@@ -1,0 +1,28 @@
+{
+  "name": "dsh-live2d-avatar",
+  "version": "1.1.0",
+  "private": true,
+  "description": "DSH bundle: a Live2D desktop pet (WebView2) that shows the Agent's status and inner thoughts",
+  "type": "module",
+  "main": "entry.js",
+  "exports": {
+    ".": "./entry.js",
+    "./engine": "./engine.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "entry.js",
+    "host.js",
+    "engine.js",
+    "test",
+    "vendor",
+    "pet",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+# dsh-live2d-avatar — profile bundle patch。
+#
+# 一行插件带起 Host 半边（entry.js → host.js：模型路由 + live2d_express 工具 + 状态）
+# 与桌面桌宠（pet/dsh-pet.ps1 用 WebView2 承载宠物页）。
+#
+# 形象**只在桌面**，没有浏览器浮层 —— 早先那版 client.js（shell.overlay 里的浮层）
+# 已经移除，见 README「桌宠（唯一的形象）」。
+#
+# 模型目录默认自动发现，优先级：
+#   1. 插件内的 modelDir 配置
+#   2. 环境变量 DSH_LIVE2D_MODEL_DIR
+#   3. 插件自带的 model/（仓库里就带着，clone 下来开箱即用）
+#   4. 插件旁边/上两级的 DS面捕版（开发时的原始位置）
+#
+# 要用自己的模型时，打开下面这段配置：
+#
+#     config:
+#       modelDir: D:\path\to\your\model
+#       modelFile: c_0120.model3.json
+- insert:
+    - id: dsh-live2d-avatar
+      name: dsh-live2d-avatar

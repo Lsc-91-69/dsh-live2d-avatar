@@ -1,0 +1,7 @@
+WebView2 SDK for the DSH Live2D desktop pet.
+Source : NuGet Microsoft.Web.WebView2 1.0.4129.50 (.NET Core build, x64)
+Core   : Microsoft.Web.WebView2.Core, Version=1.0.4129.50, Culture=neutral, PublicKeyToken=2a8ab48044d2601e
+Files  : Microsoft.Web.WebView2.Core.dll (netcoreapp3.0)
+         Microsoft.Web.WebView2.WinForms.dll (netcoreapp3.0)
+         WebView2Loader.dll (runtimes\win-x64\native)
+Note   : Microsoft.Web.WebView2.Core.dll is MIT-licensed by Microsoft.

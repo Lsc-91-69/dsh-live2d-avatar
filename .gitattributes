@@ -1,0 +1,21 @@
+# 默认：文本文件统一按 LF 存进版本库（避免 Windows 上 diff 全是行尾噪声）
+* text=auto eol=lf
+
+# Windows 脚本保持 CRLF —— 有些环境下 LF 的 .cmd 会出问题
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 明确标成二进制，禁止 git 碰它们
+*.dll  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.moc3 binary
+*.pt   binary
+
+# 模型数据是 JSON，但别当代码统计
+model/** linguist-vendored
+vendor/** linguist-vendored
+pet/lib/** linguist-vendored

@@ -1,0 +1,22 @@
+# 依赖 / 构建产物
+node_modules/
+*.log
+pnpm-debug.log*
+
+# 语音流水线的一次性产物（wav 默认写在 %TEMP%，这里兜底）
+voice/*.wav
+voice/__pycache__/
+**/__pycache__/
+*.pyc
+
+# 桌宠运行时留下的东西
+*.pos
+*.bak
+*.bak-*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
