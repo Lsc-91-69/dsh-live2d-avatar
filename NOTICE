@@ -1,0 +1,64 @@
+# 第三方组件声明
+
+本仓库的原创代码按 [LICENSE](LICENSE) 里的 MIT 授权。
+下面这些**不是**本项目的原创内容，各自按各自的条款 —— MIT 不覆盖它们。
+
+---
+
+## 1. Live2D Cubism Core — `vendor/live2dcubismcore.min.js`
+
+```
+(C) 2019 Live2D Inc. All rights reserved.
+This file is licensed pursuant to the license agreement below.
+This file corresponds to the "Redistributable Code" in the agreement.
+```
+
+按 **Live2D Proprietary Software License Agreement** 授权。
+该文件属于协议里的 "Redistributable Code"，因此可以随本项目再分发，
+但**受 Live2D 自己的条款约束** —— 尤其商业用途、以及 Live2D 品牌标示相关的要求。
+
+<https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html>
+
+**这不是 MIT。** 使用 / 再分发前请自行确认符合 Live2D 的条款。
+
+## 2. pixi.js 6.5.10 — `vendor/pixi.min.js`
+
+MIT License.
+<https://www.opensource.org/licenses/mit-license>
+
+## 3. pixi-live2d-display 0.4.0 — `vendor/cubism4.min.js`
+
+MIT License.
+<https://github.com/guansss/pixi-live2d-display>
+
+## 4. Microsoft.Web.WebView2 SDK 1.0.4129.50 — `pet/lib/*.dll`
+
+MIT License (Microsoft)。
+
+来源、版本与具体文件清单见 [`pet/lib/SOURCE.txt`](pet/lib/SOURCE.txt)：
+
+```
+Source : NuGet Microsoft.Web.WebView2 1.0.4129.50 (.NET Core build, x64)
+Files  : Microsoft.Web.WebView2.Core.dll (netcoreapp3.0)
+         Microsoft.Web.WebView2.WinForms.dll (netcoreapp3.0)
+         WebView2Loader.dll (runtimes\win-x64\native)
+```
+
+## 5. Live2D 模型 — `model/`
+
+`model/` 里的 `c_0120` 及其配套贴图 / 表情 / 动作 / 物理文件，
+是随 `DS面捕版` 一起拿到的 Live2D 角色模型。
+
+**来源与授权状况不明。** 本项目只做加载与呈现，**不对该模型主张任何权利**，
+也不对其可用性、合法性作任何担保。
+
+> **如果你打算公开分发本仓库，请先确认自己有权分发这个模型。**
+>
+> 不确定就把 `model/` 从版本库里去掉：
+>
+> ```powershell
+> git rm -r --cached model
+> ```
+>
+> 然后让使用者用 `config.modelDir` 或环境变量 `DSH_LIVE2D_MODEL_DIR`
+> 指向他们自己的模型。**代码部分不依赖这个目录。**
