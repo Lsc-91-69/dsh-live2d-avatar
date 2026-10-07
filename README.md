@@ -1196,3 +1196,21 @@ GET /live2d/audio/<name>.wav        # 取音频（只接受纯文件名，挡 ..
 - 桌宠窗口会盖住它下面的内容；它只在 DSH 运行时存在，DSH 一停就自己退场（5 秒心跳）。
 - 系统需要 WebView2 Runtime（Win11 自带；Win10 多半也有），以及 PowerShell 7（`pwsh`）。
 - `wsServer` 之外的插件若也注册 `/live2d` 前缀会与本插件冲突（webserver 前缀路由重复会抛错）。
+
+---
+
+## 许可
+
+本项目的**原创代码**按 [MIT](LICENSE) 授权。
+
+仓库里还带着别人做的东西，**不在 MIT 覆盖范围内**：
+
+| 内容 | 授权 |
+| --- | --- |
+| `vendor/live2dcubismcore.min.js` | Live2D 专有协议（属协议里的 "Redistributable Code"），**不是 MIT** |
+| `vendor/pixi.min.js` | MIT |
+| `vendor/cubism4.min.js` | MIT |
+| `pet/lib/*.dll` | MIT（Microsoft WebView2 SDK） |
+| `model/` | **来源与授权状况不明** —— 本项目不主张任何权利 |
+
+逐条声明、原文出处，以及「不确定是否有权分发模型时该怎么办」见 **[NOTICE](NOTICE)**。

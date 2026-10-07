@@ -19,12 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
---------------------------------------------------------------------------------
-
-上面这份 MIT **只覆盖本项目的原创代码**（`host.js` / `engine.js` / `entry.js` /
-`pet/dsh-pet.ps1` / `test/` / 文档）。
-
-仓库里还带着别人做的东西 —— Live2D Cubism Core、pixi.js、pixi-live2d-display、
-WebView2 SDK，以及一个来源不明的 Live2D 角色模型。它们各自按各自的条款，
-**不在 MIT 的覆盖范围内**。详见 [NOTICE](NOTICE)。
