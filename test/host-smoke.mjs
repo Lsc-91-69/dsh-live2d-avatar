@@ -8,7 +8,7 @@
  */
 import { Writable } from 'node:stream'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -46,6 +46,23 @@ const check = (label, actual, expected) => {
 const assert = (label, condition, detail = '') => {
   if (!condition) failures += 1
   console.log(`${condition ? 'ok  ' : 'FAIL'} ${label}${condition ? '' : ` — ${detail}`}`)
+}
+
+// ── 「clone 就能跑」：仓库自带的 model/ 必须在候选里，且排在开发机的路径之前 ──
+{
+  const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  assert('候选里包含插件自带的 model/', src.includes("resolve(HERE, 'model')"))
+  {
+    const from = src.indexOf('function modelDirCandidates(')
+    const to = src.indexOf('\n}', from)
+    const body = src.slice(from, to)
+    const own = body.indexOf("resolve(HERE, 'model')")
+    const dev = body.indexOf("'DS面捕版'")
+    assert('自带的 model/ 排在 DS面捕版 之前', own >= 0 && dev >= 0 && own < dev)
+  }
+  assert('插件目录下确实有 model/', existsSync(join(HERE, '..', 'model')))
+  assert('模型目录里有 model3.json',
+    readdirSync(join(HERE, '..', 'model')).some(n => n.endsWith('.model3.json')))
 }
 
 const route = captured.routes[0]
