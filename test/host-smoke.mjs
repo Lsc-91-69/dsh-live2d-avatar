@@ -83,7 +83,10 @@ const json = async (url) => JSON.parse((await call(url)).body.toString('utf8'))
 console.log('— 注册 —')
 check('route', captured.routes.map(r => `${r.kind} ${r.path}`), ['prefix /live2d'])
 check('tool', captured.tools.map(tool => tool.name), ['live2d_express'])
-check('prompt section', captured.sections.map(section => section.name), ['tool:live2d'])
+// 本插件现在注册两个段落：tool:live2d（气泡怎么写）+ dsh-live2d/language（用中文思考）。
+// 按集合比较，不依赖注册顺序。
+check('prompt section', captured.sections.map(section => section.name).sort(),
+  ['dsh-live2d/language', 'tool:live2d'])
 // agent/assistant-stream 是思维链来源。按集合比较，不依赖注册顺序。
 // agent/assistant-stream 是思维链来源；approval/request 与 user-questions/request
 // 是「需要你操作」的信号（黄灯）。tools/pre-execute + tools/result 是第二条独立
@@ -96,7 +99,8 @@ check('events', [...captured.events.keys()].sort(), [
 ])
 
 console.log('\n— 提示词必须给出「真实」的标准，而不只是发送节奏 —')
-const promptText = captured.sections[0].text
+// 认清是哪一个：本插件注册了两个段落，[0] 现在是语言段落。
+const promptText = captured.sections.find(section => section.name === 'tool:live2d').text
 check('要求真实、且明确反对预设', promptText.includes('要真实，不要预设'), true)
 check('要求「此刻 + 绑定眼前这件事」', promptText.includes('此刻') && promptText.includes('跟眼前这件事绑定'), true)
 check('要求具体到当下（给了对照例子）', promptText.includes('这个正则我试了三遍'), true)
