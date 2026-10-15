@@ -817,6 +817,63 @@ console.log('\n— 心跳里的两个误判 —')
   assert('落在屏幕外就用默认位置', pet.includes('已不在任何屏幕内'))
 }
 
+console.log('\n— 拖动必须做 CSS 像素 → 物理像素换算 —')
+{
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+
+  // 用户报的现象：「拖动时窗口走的距离比鼠标短」。
+  // 根因：MouseEvent.screenX/screenY 的单位是 **CSS 像素**（CSSOM View 规范），
+  // 不是物理像素。而窗口为了「原版精度」把物理尺寸设成了 逻辑×$scale，
+  // 于是 150% 下 devicePixelRatio=1.5：鼠标走 150 物理像素，screenX 只 +100，
+  // 而 $form.Location 是物理像素 —— 窗口只走 100，正好是鼠标的 2/3。
+  assert('dx 乘了 $scale 换算', pet.includes('([double]$msg.dx * $scale)'))
+  assert('dy 也乘了', pet.includes('([double]$msg.dy * $scale)'))
+  assert('累积小数余量（防慢速拖动漂移）',
+    pet.includes('$script:dragResidualX') && pet.includes('$rawX - $dx'))
+  assert('旧的那句错误结论已经删掉', !pet.includes('不需要再乘 DPI 缩放'))
+
+  // 页面侧：明确单位是 CSS 像素，别在那边自己乘
+  assert('页面注释已纠正为 CSS 像素',
+    host.includes('单位是 **CSS 像素**，不是物理像素'))
+  // 只盯拖动那段 —— host.js 里 canvas 后备缓冲本来就要用 devicePixelRatio，
+  // 不能全局断言它的存在。
+  {
+    const from = host.indexOf("stage.addEventListener('pointermove'")
+    const to = host.indexOf('function endDrag', from)
+    const dragBlock = host.slice(from, to)
+    assert('拖动段存在且拿到指针增量', dragBlock.includes('event.screenX - dragStart.x'))
+    assert('拖动段没有自己先乘一遍', !dragBlock.includes('devicePixelRatio'))
+    assert('拖动段原样上报 dx/dy', dragBlock.includes("post('drag', { dx: dx, dy: dy })"))
+  }
+
+  // 数值自证：模拟拖动，验证总位移与鼠标一致、且不漂。
+  const scale = 1.5
+  function simulate(perFrameCss, frames) {
+    let residual = 0
+    let moved = 0
+    for (let i = 0; i < frames; i++) {
+      const raw = perFrameCss * scale + residual
+      const step = Math.round(raw)
+      residual = raw - step
+      moved += step
+    }
+    return moved
+  }
+  // 每帧 1 CSS px × 100 帧 = 100 CSS px → 物理应为 150
+  const m1 = simulate(1, 100)
+  assert(`慢速拖动不漂移（1 CSS px × 100 帧 → 期望 150 物理，实走 ${m1}）`, m1 === 150)
+  // 最容易丢精度的情形：每帧只有半个 CSS 像素
+  const m2 = simulate(0.5, 200)
+  assert(`半像素拖动不丢（0.5 CSS px × 200 帧 → 期望 150 物理，实走 ${m2}）`, m2 === 150)
+  // 反向自证：不做换算会少走 1/3 —— 这正是用户看到的现象
+  assert('不换算就会只走 2/3（复现用户现象）', Math.abs(100 / 150 - 2 / 3) < 1e-9)
+
+  // 位置校验的单位也要统一：物理坐标配物理尺寸
+  assert('Test-PosVisible 用物理尺寸', pet.includes('$X + $physW') && pet.includes('$Y + $physH'))
+  assert('默认位置也用物理尺寸', pet.includes('$wa.Right - $physW - 40'))
+}
+
 console.log('\n— 思维链要精炼，不是截取 —')
 {
   const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')

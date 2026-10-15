@@ -393,7 +393,9 @@ ${engine}
 
   stage.addEventListener('pointermove', function (event) {
     if (!dragging || !dragStart) return;
-    // 用 screenX/screenY：它是屏幕物理坐标，不受页面内缩放影响。
+    // 用 screenX/screenY：屏幕坐标系，不受页面内滚动/布局影响。
+    // 单位是 **CSS 像素**，不是物理像素（CSSOM View 规范如此）。宿主那边会乘
+    // $scale 换算成物理像素再改窗口位置，这里千万别自己先乘一遍。
     var dx = event.screenX - dragStart.x;
     var dy = event.screenY - dragStart.y;
     if (dx === 0 && dy === 0) return;

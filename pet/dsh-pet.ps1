@@ -230,12 +230,14 @@ Log "窗口尺寸：逻辑 ${Width}x${Height} → 物理 ${physW}x${physH}（DPI
 # 但人什么都看不见，表现和「桌宠没起来」一模一样。
 function Test-PosVisible {
   param([int]$X, [int]$Y)
-  # 要求至少有 80×80 逻辑像素落在某个屏幕的工作区内，才算「看得见」
+  # 单位必须统一：$X/$Y 和 WorkingArea 都是**物理**像素，所以窗口尺寸也得用物理的
+  # （$physW/$physH）。这里原先用的是 $Width/$Height（逻辑值），150% 下把窗口
+  # 少算了 1/3，判断会偏松。
   $need = 80
   foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
     $wa = $s.WorkingArea
-    $ix = [Math]::Min($X + $Width, $wa.Right) - [Math]::Max($X, $wa.Left)
-    $iy = [Math]::Min($Y + $Height, $wa.Bottom) - [Math]::Max($Y, $wa.Top)
+    $ix = [Math]::Min($X + $physW, $wa.Right) - [Math]::Max($X, $wa.Left)
+    $iy = [Math]::Min($Y + $physH, $wa.Bottom) - [Math]::Max($Y, $wa.Top)
     if ($ix -ge $need -and $iy -ge $need) { return $true }
   }
   return $false
@@ -243,8 +245,9 @@ function Test-PosVisible {
 
 $posFile = Join-Path $env:LOCALAPPDATA 'dsh-live2d-pet.pos'
 $defaultPos = {
+  # WorkingArea 是物理像素，所以这里也用物理尺寸
   $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-  New-Object System.Drawing.Point(($wa.Right - $Width - 40), ($wa.Bottom - $Height - 40))
+  New-Object System.Drawing.Point(($wa.Right - $physW - 40), ($wa.Bottom - $physH - 40))
 }
 $placed = $false
 if (Test-Path $posFile) {
@@ -363,9 +366,20 @@ Log "已加载 $Url/live2d/pet"
 # 会接走所有鼠标事件，Form 的鼠标事件**永远不触发** —— 早先那段拖动代码从未生效。
 # 所以拖动必须在页面里发起，通过 WebViewMessageReceived 传进来。
 #
-# 页面用的是 screenX/screenY（屏幕物理坐标），所以 dx/dy 直接就是物理像素，
-# 不需要再乘 DPI 缩放 —— 这一点很关键，否则高 DPI 下拖动会漂移。
+# **dx/dy 是 CSS 像素，必须乘 $scale 换成物理像素。**
+#
+# 原先这里写着「screenX/screenY 是屏幕物理坐标，不用乘 DPI 缩放」—— 这句是错的。
+# 按 CSSOM View 规范，MouseEvent.screenX/screenY 的单位是 **CSS 像素**，不是物理像素。
+# 而本窗口为了「原版精度」把物理尺寸设成了 逻辑×$scale（见上面第 3 节），
+# 于是页面 CSS 视口是 340×460、物理窗口是 510×690，devicePixelRatio = $scale = 1.5。
+# 结果：鼠标实际移动 150 物理像素，screenX 只增加 100；而 $form.Location 是物理像素，
+# 加 100 就只走了 100 —— **窗口位移只有鼠标的 2/3**，越拖越落后。
+#
+# 另外必须累积小数余量：1.5 倍下每 1 CSS 像素 = 1.5 物理像素，逐帧四舍五入会把
+# 慢速拖动的那 0.5 像素一次次丢掉，长距离下来仍然会漂。
 $script:lastDragLog = [datetime]::MinValue
+$script:dragResidualX = 0.0
+$script:dragResidualY = 0.0
 
 $controller.CoreWebView2.Add_WebMessageReceived({
   param($s, $e)
@@ -373,8 +387,13 @@ $controller.CoreWebView2.Add_WebMessageReceived({
     $msg = $e.WebMessageAsJson | ConvertFrom-Json
     switch ($msg.type) {
       'drag' {
-        $dx = [int]$msg.dx
-        $dy = [int]$msg.dy
+        # CSS 像素 → 物理像素，带上一次没走完的零头
+        $rawX = ([double]$msg.dx * $scale) + $script:dragResidualX
+        $rawY = ([double]$msg.dy * $scale) + $script:dragResidualY
+        $dx = [int][math]::Round($rawX)
+        $dy = [int][math]::Round($rawY)
+        $script:dragResidualX = $rawX - $dx
+        $script:dragResidualY = $rawY - $dy
         if ($dx -eq 0 -and $dy -eq 0) { return }
         $form.Location = New-Object System.Drawing.Point(
           ($form.Location.X + $dx),
@@ -382,7 +401,7 @@ $controller.CoreWebView2.Add_WebMessageReceived({
         # 拖动日志按秒节流，否则会把日志刷爆
         if (((Get-Date) - $script:lastDragLog).TotalSeconds -gt 1) {
           $script:lastDragLog = Get-Date
-          Log "拖动 → 窗口位置 $($form.Location.X),$($form.Location.Y)（本次 d=$dx,$dy）"
+          Log "拖动 → 窗口位置 $($form.Location.X),$($form.Location.Y)（本次 d=${dx},${dy} 物理 / $($msg.dx),$($msg.dy) CSS）"
         }
       }
       'zoom' {
