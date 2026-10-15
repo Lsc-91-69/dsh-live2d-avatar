@@ -67,6 +67,10 @@ Add-Type -Namespace Dsh -Name Top -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+// 往上找根窗口。WindowFromPoint 命中的是**最上层的子窗口**，而我们的窗口里铺着
+// WebView2，它的子 HWND 属于 msedgewebview2.exe —— 拿子窗口去比 PID 永远不等。
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+public const uint GA_ROOT = 2;
 [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
 [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int index, int value);
 [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
@@ -219,16 +223,43 @@ $form.Size = New-Object System.Drawing.Size($physW, $physH)
 Log "窗口尺寸：逻辑 ${Width}x${Height} → 物理 ${physW}x${physH}（DPI 缩放 $([math]::Round($scale*100))%）"
 
 # 记位置，下次开在同一处（存 %LOCALAPPDATA%）
+#
+# 恢复前必须**校验这个位置现在还在不在屏幕上**：位置是上次退出时存的，中间可能
+# 拔过副屏、改过分辨率、或者被拖到了负坐标（实测存到过 x=-48）。存进去的位置
+# 在新显示器布局里可能整个落在屏幕外 —— 窗口照样创建、进程照样活着，
+# 但人什么都看不见，表现和「桌宠没起来」一模一样。
+function Test-PosVisible {
+  param([int]$X, [int]$Y)
+  # 要求至少有 80×80 逻辑像素落在某个屏幕的工作区内，才算「看得见」
+  $need = 80
+  foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+    $wa = $s.WorkingArea
+    $ix = [Math]::Min($X + $Width, $wa.Right) - [Math]::Max($X, $wa.Left)
+    $iy = [Math]::Min($Y + $Height, $wa.Bottom) - [Math]::Max($Y, $wa.Top)
+    if ($ix -ge $need -and $iy -ge $need) { return $true }
+  }
+  return $false
+}
+
 $posFile = Join-Path $env:LOCALAPPDATA 'dsh-live2d-pet.pos'
+$defaultPos = {
+  $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  New-Object System.Drawing.Point(($wa.Right - $Width - 40), ($wa.Bottom - $Height - 40))
+}
+$placed = $false
 if (Test-Path $posFile) {
   try {
     $p = Get-Content -LiteralPath $posFile -Raw | ConvertFrom-Json
-    $form.Location = New-Object System.Drawing.Point([int]$p.x, [int]$p.y)
-  } catch { $form.Location = New-Object System.Drawing.Point(340, 190) }
-} else {
-  $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-  $form.Location = New-Object System.Drawing.Point(($wa.Right - $Width - 40), ($wa.Bottom - $Height - 40))
+    $sx = [int]$p.x; $sy = [int]$p.y
+    if (Test-PosVisible -X $sx -Y $sy) {
+      $form.Location = New-Object System.Drawing.Point($sx, $sy)
+      $placed = $true
+    } else {
+      Log "记住的位置 ($sx,$sy) 已不在任何屏幕内，改用默认位置"
+    }
+  } catch { Log "位置文件读不出来，改用默认位置：$($_.Exception.Message)" }
 }
+if (-not $placed) { $form.Location = & $defaultPos }
 # 透明方案：**不用** TransparencyKey 抠像，改用 DWM 合成。
 #
 # 为什么不用 TransparencyKey（代价最大的一条教训）：
@@ -373,26 +404,63 @@ $controller.CoreWebView2.Add_WebMessageReceived({
 
 $form.Add_Resize({ & $syncBounds })
 
+# 退出原因要告诉 Host，否则它分不清「用户主动关的」和「自己死掉的」。
+# 前者要尊重（别再弹回来），后者必须重生 —— 否则就变成用户报的那个现象：
+# 桌宠自己退了，插件还开着，屏幕上什么都没有，只能关掉插件再打开。
+$script:exitReason = 'unknown'
+
 # 记住位置；Esc / 双击标题区外的右键菜单都没有，用 Ctrl+Q 退出
 $form.Add_FormClosing({
   try { @{ x = $form.Location.X; y = $form.Location.Y } | ConvertTo-Json | Set-Content -LiteralPath $posFile -Encoding UTF8 } catch { }
+  # 只上报「不是用户关的」。用户主动关的不用报 —— 报不报 Host 都不该重生它。
+  if ($script:exitReason -ne 'user') {
+    try {
+      $u = ($Url.TrimEnd('/') + '/live2d/pet-exit?reason=' + $script:exitReason)
+      Invoke-WebRequest -Uri $u -TimeoutSec 3 -UseBasicParsing | Out-Null
+      Log "已上报退出原因：$($script:exitReason)"
+    } catch { Log "上报退出原因失败（不影响退出）：$($_.Exception.Message)" }
+  }
 })
 $form.KeyPreview = $true
 $form.Add_KeyDown({
   param($s, $e)
-  if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Q) { $form.Close() }
-  if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() }
+  if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Q) { $script:exitReason = 'user'; $form.Close() }
+  if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $script:exitReason = 'user'; $form.Close() }
 })
 
 # ── 6. 心跳：DSH 一停，桌宠自己也退场（「只有 DSH 开着才醒」） ────────────
+#
+# 两次误判都出在这个心跳里，都是实测踩到的：
+#
+# (1) 离线误判 —— 原先**一次探测失败就退出**，而探测打的是 `/live2d/manifest`，
+#     那是插件自己的路由。宿主忙一下、请求超过 5 秒，就被判成「DSH 已离线」，
+#     桌宠当场退场（日志里就是这么写的），而 DSH 其实好好的。
+#     现在要求**连续失败**才退场，中间只要成功一次就把计数清零。
+#
+# (2) 置顶误判 —— `WindowFromPoint` 命中的是**最上层的子窗口**，而我们窗口里铺着
+#     WebView2，那个子 HWND 属于 msedgewebview2.exe。拿它的 PID 和 $PID 比永远不等，
+#     于是「被盖住」每 5 秒误报一次（实测刷到 323 次）。改成往上取根窗口比 HWND。
+$script:offlineStrikes = 0
+$script:offlineStrikesNeeded = 6   # 6 × 5s = 连续 30 秒探不通才算真离线
+
 $heartbeat = New-Object System.Windows.Forms.Timer
 $heartbeat.Interval = 5000
 $heartbeat.Add_Tick({
-  if (-not (Test-Dsh $Url)) {
-    Log 'DSH 已离线，桌宠退出。'
-    $heartbeat.Stop()
-    $form.Close()
-    return
+  if (Test-Dsh $Url) {
+    if ($script:offlineStrikes -gt 0) {
+      Log "DSH 探测恢复正常（此前连续失败 $($script:offlineStrikes) 次）"
+      $script:offlineStrikes = 0
+    }
+  } else {
+    $script:offlineStrikes++
+    if ($script:offlineStrikes -ge $script:offlineStrikesNeeded) {
+      Log "DSH 已离线（连续 $($script:offlineStrikes) 次探测失败：$($script:probeError)），桌宠退出。"
+      $script:exitReason = 'offline'
+      $heartbeat.Stop()
+      $form.Close()
+      return
+    }
+    Log "DSH 探测失败第 $($script:offlineStrikes)/$($script:offlineStrikesNeeded) 次：$($script:probeError)"
   }
   # 每 5 秒重申一次置顶：别的程序（尤其是全屏浏览器）会把我们压下去，
   # 压下去之后鼠标就全落到它身上，表现为「点击穿透」。
@@ -403,9 +471,10 @@ $heartbeat.Add_Tick({
     $pt = New-Object Dsh.Top+POINT
     $pt.X = $cx; $pt.Y = $cy
     $hit = [Dsh.Top]::WindowFromPoint($pt)
-    $hitPid = 0
-    [Dsh.Top]::GetWindowThreadProcessId($hit, [ref]$hitPid) | Out-Null
-    if ($hitPid -ne $PID) { Assert-TopMost '被其它窗口盖住' }
+    # 必须取根窗口：命中的通常是 WebView2 的子 HWND，它的属主是
+    # msedgewebview2.exe，直接比 PID 会永远判成「被盖住」。
+    $root = [Dsh.Top]::GetAncestor($hit, [Dsh.Top]::GA_ROOT)
+    if ($root -ne $form.Handle) { Assert-TopMost '被其它窗口盖住' }
   } catch { }
 })
 $heartbeat.Start()

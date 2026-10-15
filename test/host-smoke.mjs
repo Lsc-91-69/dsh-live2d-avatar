@@ -773,6 +773,50 @@ console.log('\n— 桌宠生命周期：谁拉起的谁负责收 —')
     src.includes("spawn('taskkill', ['/PID', String(pid), '/T', '/F']"))
 }
 
+console.log('\n— 桌宠意外退出必须重生（用户报的「开着但不显示」）—')
+{
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+
+  // 根因链：外壳的离线探测打的是**插件自己的**路由 /live2d/manifest，
+  // 宿主忙一下、请求超过 5 秒就被判成「DSH 已离线」→ 自己退场。
+  // 而 Host 原先把**任何**退出都当成「用户按了 Esc」，于是再也不重生 ——
+  // 屏幕上什么都没有，只能把插件关掉再打开。日志实证：
+  //   「10:06:57.488 DSH 已离线，桌宠退出。」——而 DSH 明明在跑。
+  assert('探测失败不再一次就退场（要求连续失败）',
+    pet.includes('$script:offlineStrikes') && pet.includes('offlineStrikesNeeded'))
+  assert('中途成功一次就清零', pet.includes('$script:offlineStrikes = 0'))
+  assert('退场前标明原因是 offline', pet.includes("$script:exitReason = 'offline'"))
+  assert('用户按键才标 user', pet.includes("$script:exitReason = 'user'"))
+  assert('退出原因上报给 Host', pet.includes('/live2d/pet-exit?reason='))
+  assert('Host 有收退场原因的路由', host.includes("pathname === '/live2d/pet-exit'"))
+  assert('只有 user 才不重生', host.includes('if (petExit.userClosed)'))
+  assert('意外退出走重生', host.includes('scheduleRevive()'))
+  assert('重生有次数上限（防无限重启）',
+    host.includes('PET_REVIVE') && host.includes('maxAttempts'))
+  assert('dispose 时掐掉待执行的重生', host.includes('cancelRevive()'))
+  assert('每拉起一只就重置退出标记', host.includes('petExit.userClosed = false'))
+}
+
+console.log('\n— 心跳里的两个误判 —')
+{
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+
+  // 置顶误判：WindowFromPoint 命中的是 WebView2 的**子** HWND，属主是
+  // msedgewebview2.exe。拿它的 PID 比 $PID 永远不等 → 每 5 秒误报一次
+  // 「被其它窗口盖住」（实测刷到 323 次）。
+  assert('取根窗口再比，而不是比 PID',
+    pet.includes('GetAncestor($hit, [Dsh.Top]::GA_ROOT)') && pet.includes('$root -ne $form.Handle'))
+  assert('不再用 PID 比窗口归属', !pet.includes('if ($hitPid -ne $PID)'))
+  assert('声明了 GetAncestor', pet.includes('GetAncestor(IntPtr h, uint flags)'))
+
+  // 位置越界：位置是上次退出时存的，中间可能拔过副屏、改过分辨率，
+  // 存进去的坐标在新布局里可能整个落在屏幕外 —— 窗口照样建、进程照样活，
+  // 但人什么都看不见，和「没起来」一模一样。实测存到过 x=-48。
+  assert('恢复位置前校验是否还在屏幕内', pet.includes('function Test-PosVisible'))
+  assert('落在屏幕外就用默认位置', pet.includes('已不在任何屏幕内'))
+}
+
 console.log('\n— 思维链要精炼，不是截取 —')
 {
   const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')

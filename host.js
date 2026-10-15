@@ -1628,6 +1628,54 @@ export function apply(ctx, config) {
    */
   const petStatus = { mode: 'off', state: 'idle', pid: null, detail: '' }
 
+  /**
+   * 桌宠的退出原因由它自己上报（`/live2d/pet-exit`）。
+   *
+   * 为什么要多这一条上报：Host 只看得到「子进程退了」，分不清是**用户按了 Esc**
+   * 还是**它自己死的**。原先一律当成前者，于是它一死就再也不重生 ——
+   * 用户看到的就是「插件开着，屏幕上什么都没有，只能关掉插件再打开」。
+   * 而现在真正的原因常常是：外壳误判 DSH 离线（探测打的是插件自己的路由，
+   * 宿主忙一下就超时），于是它自己退了，DSH 却好好的。
+   */
+  const petExit = { reason: null, at: 0, userClosed: false }
+
+  /** 重生：只在「不是用户关的」时候跑，带退避和次数上限，避免变成无限重启。 */
+  const PET_REVIVE = { delayMs: 4000, maxAttempts: 5, windowMs: 10 * 60_000 }
+  const petRevive = { attempts: 0, windowStart: 0, timer: null, total: 0, lastDetail: null }
+
+  function cancelRevive() {
+    if (petRevive.timer !== null) {
+      clearTimeout(petRevive.timer)
+      petRevive.timer = null
+    }
+  }
+
+  function scheduleRevive() {
+    const now = Date.now()
+    if (now - petRevive.windowStart > PET_REVIVE.windowMs) {
+      petRevive.windowStart = now
+      petRevive.attempts = 0
+    }
+    if (petRevive.attempts >= PET_REVIVE.maxAttempts) {
+      petStatus.detail += `；${PET_REVIVE.windowMs / 60_000} 分钟内已重生 ${petRevive.attempts} 次仍退出，放弃（避免无限重启）`
+      petRevive.lastDetail = 'gave-up'
+      console.warn(`[dsh-live2d] ${petStatus.detail}`)
+      return
+    }
+    petRevive.attempts += 1
+    petRevive.total += 1
+    petRevive.lastDetail = `第 ${petRevive.attempts} 次`
+    cancelRevive()
+    petRevive.timer = setTimeout(() => {
+      petRevive.timer = null
+      // 期间可能已经起来了（或插件被停用了）—— 别重复拉起
+      if (petStatus.state === 'running') return
+      if (config?.desktopPet === 'off' || config?.desktopPet === false) return
+      console.log(`[dsh-live2d] 重新拉起桌宠（${petRevive.lastDetail}）`)
+      launchPet()
+    }, PET_REVIVE.delayMs)
+  }
+
   function launchPet() {
     const setting = config?.desktopPet ?? 'auto'
     if (setting === 'off' || setting === false) {
@@ -1635,6 +1683,9 @@ export function apply(ctx, config) {
       petStatus.detail = '配置为 off，不拉起'
       return
     }
+    // 每拉起一只就重置退出标记：上一只的「用户关闭」不能影响这一只。
+    petExit.userClosed = false
+    petExit.reason = null
     const script = join(HERE, PET_SCRIPT)
     if (!existsSync(script)) {
       petStatus.state = 'failed'
@@ -1686,11 +1737,28 @@ export function apply(ctx, config) {
         console.warn(`[dsh-live2d] 桌宠${petStatus.detail}`)
       })
       child.on('exit', (code) => {
-        // 外壳自己退场（用户 Esc / DSH 离线）后不再重生 —— 尊重用户的关闭动作。
-        if (petStatus.state === 'running') {
+        // 只有还处于 running 的才是「我们以为它在跑、它却退了」。
+        // stopPet()（插件停用/重载）会先把状态置成 exited，所以那种情况不会走到这里。
+        if (petStatus.state !== 'running') return
+        petStatus.pid = null
+
+        // 用户主动关的（Esc / Ctrl+Q）→ 尊重，不重生。
+        // 这是唯一一种「不该弹回来」的退出。
+        if (petExit.userClosed) {
           petStatus.state = 'exited'
-          petStatus.detail = `桌宠已退出（code ${code ?? 'null'}）`
+          petStatus.detail = `用户关闭了桌宠（code ${code ?? 'null'}），不重生`
+          console.log('[dsh-live2d] 桌宠被用户关闭，不再拉起')
+          return
         }
+
+        // 其余全是**它自己死的**：误判离线、WebView2 崩了、脚本抛异常……
+        // 而此刻 DSH 明明还在跑（这段代码就在跑），所以没有任何理由让它一直空着 ——
+        // 原先这里一律当成「用户关的」不重生，结果就是用户报的那个现象：
+        // 插件开着、屏幕上什么都没有，只能把插件关掉再打开才回来。
+        petStatus.state = 'exited'
+        petStatus.detail = `桌宠意外退出（code ${code ?? 'null'}，原因 ${petExit.reason ?? '未知'}），准备重生`
+        console.log(`[dsh-live2d] ${petStatus.detail}`)
+        scheduleRevive()
       })
       petStatus.state = 'running'
       petStatus.pid = child.pid ?? null
@@ -1758,6 +1826,8 @@ export function apply(ctx, config) {
   ctx.effect(() => {
     launchPet()
     return () => {
+      // 先掐掉待执行的重生定时器，否则插件停用后它还会把桌宠拉回来。
+      cancelRevive()
       // 谁拉起的谁负责收 —— 否则插件每次重载都会在屏幕上多叠一只。
       stopPet()
       // 语音工作进程也必须收掉：它没有心跳，会一直占着几百 MB 内存当孤儿。
@@ -2337,6 +2407,18 @@ export function apply(ctx, config) {
       })
     }
 
+    // 桌宠退场前上报原因。有了它，Host 才能区分「用户按了 Esc」和「它自己死的」——
+    // 前者要尊重（不重生），后者必须重生（否则就是「插件开着但屏幕上什么都没有」）。
+    if (pathname === '/live2d/pet-exit') {
+      const url = new URL(req.url, 'http://localhost')
+      const reason = url.searchParams.get('reason') ?? 'unknown'
+      petExit.reason = reason
+      petExit.at = Date.now()
+      if (reason === 'user') petExit.userClosed = true
+      console.log(`[dsh-live2d] 桌宠上报退出原因：${reason}`)
+      return sendJson(res, 200, { ok: true, reason })
+    }
+
     // 碎碎念的语音。页面侧自己决定念什么（那是它的兜底逻辑），
     // 但合成要交给常驻 worker —— 所以走这条上报通道。
     if (pathname === '/live2d/murmur') {
@@ -2568,7 +2650,14 @@ export function apply(ctx, config) {
         statuses: ['idle', 'thinking'],
         // 桌宠是可诊断的：状态、pid、失败原因都如实报出来，
         // 免得再出现「以为它在跑、其实没启动」这种只能靠猜的情况。
-        desktopPet: { ...petStatus },
+        desktopPet: {
+          ...petStatus,
+          // 退出/重生诊断：state 停在 exited 且 revive.total 在涨，就是「它在反复死」；
+          // state=exited 且 lastReason=user，才是「用户自己关的，我尊重」。
+          lastExitReason: petExit.reason,
+          lastExitAt: petExit.at === 0 ? null : petExit.at,
+          revive: { total: petRevive.total, attemptsInWindow: petRevive.attempts, pending: petRevive.timer !== null, last: petRevive.lastDetail },
+        },
       })
     }
 
