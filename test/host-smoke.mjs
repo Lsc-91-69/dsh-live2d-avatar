@@ -874,6 +874,38 @@ console.log('\n— 拖动必须做 CSS 像素 → 物理像素换算 —')
   assert('默认位置也用物理尺寸', pet.includes('$wa.Right - $physW - 40'))
 }
 
+console.log('\n— 让模型用中文思考（提示词段落）—')
+{
+  const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+
+  // 用户要的是**真的改思考语言**，不是只把气泡翻成中文 ——
+  // 气泡那句「心里话」是从思维链精炼来的，思维链是英文就等于在翻译。
+  assert('声明了 systemPrompt 服务', src.includes("'systemPrompt'"))
+  assert('注册了提示词段落', src.includes('ctx.systemPrompt.section('))
+  assert('段落名稳定', src.includes("const PROMPT_LANGUAGE_SECTION = 'dsh-live2d/language'"))
+  assert('order 是有限数', /const PROMPT_LANGUAGE_ORDER = \d+/.test(src))
+  assert('正文要求中文书写思维链', src.includes('思维链（reasoning）用中文书写'))
+  assert('讲了「为什么」（模型更容易遵守）', src.includes('退化成翻译'))
+  assert('保留原文的例外也写了', src.includes('保持原文即可，不必翻译'))
+
+  // 段落必须在 effect 的 disposer 里返回 —— 插件一停用它就消失，
+  // 这正是「这个插件打开的时候」的语义。
+  {
+    const from = src.indexOf('ctx.effect(() => {\n    if (config?.thinkInChinese === false) return')
+    const to = src.indexOf("'dsh-live2d: think in Chinese'", from)
+    assert('注册在 effect 里（停用即失效）', from > 0 && to > from)
+    const body = src.slice(from, to)
+    assert('effect 返回的就是 section 的 disposer', body.includes('return ctx.systemPrompt.section('))
+    assert('可以关掉', body.includes('thinkInChinese === false'))
+  }
+
+  // 段落注册进去之后没别的办法从外面确认它真的生效 ——
+  // 唯一证据是跑一次真实的 assemble()，所以探针必须有。
+  assert('有 assemble 探针路由', src.includes("pathname === '/live2d/probe-prompt'"))
+  assert('探针真的调 assemble', src.includes('await ctx.systemPrompt.assemble()'))
+  assert('探针报告段落位置', src.includes('present: mine !== undefined'))
+}
+
 console.log('\n— 思维链要精炼，不是截取 —')
 {
   const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')

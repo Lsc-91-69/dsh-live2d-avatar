@@ -21,6 +21,28 @@ import { tmpdir } from 'node:os'
 /** 声明的服务：缺任何一个，cordis 会把本插件挂起而不是带着半成品运行。 */
 export const inject = ['tools', 'webServer', 'systemPrompt']
 
+// ── 「让模型用中文思考」的提示词段落 ────────────────────────────────────────
+//
+// 为什么要动系统提示词，而不是只把气泡翻成中文：
+// 桌宠气泡里那句「心里话」是从**思维链**精炼出来的。思维链如果是英文，
+// 这个精炼过程就退化成翻译 —— 语气、犹豫、取舍这些最像「人」的部分会掉一层。
+// 所以要真的改思考语言，只能从提示词这一层下手。
+const PROMPT_LANGUAGE_SECTION = 'dsh-live2d/language'
+// 取一个大数让它落到靠后位置：越靠后的段落约束力越强，
+// 而「用什么语言说话」属于表达层的约定，适合放在具体任务说明之后。
+const PROMPT_LANGUAGE_ORDER = 900
+const PROMPT_LANGUAGE_TEXT = [
+  '## 思考语言：中文',
+  '',
+  '**思维链（reasoning）用中文书写。** 回答也用中文。',
+  '',
+  '原因：本机启用了 Live2D 桌宠插件，它会把你的思维链实时精炼成一句简短的中文',
+  '「心里话」显示在用户桌面上。思维链若用英文，这一步就退化成翻译，',
+  '语气和细节都会损失 —— 而用户看的就是那句话。',
+  '',
+  '保持原文即可，不必翻译：代码、命令、文件路径、标识符、报错信息、专有名词。',
+].join('\n')
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const VENDOR_DIR = join(HERE, 'vendor')
 
@@ -1837,6 +1859,27 @@ export function apply(ctx, config) {
     }
   }, 'dsh-live2d: desktop pet')
 
+  // ── 让模型用中文思考 ──────────────────────────────────────────────────────
+  //
+  // 用户要的是**真的改模型的思考语言**，不是只把气泡翻成中文。
+  // 气泡里那句「心里话」本来就是从思维链精炼出来的 —— 思维链若是英文，
+  // 精炼就等于翻译，语气、犹豫、取舍全掉一层。所以必须从提示词这一层下手。
+  //
+  // `ctx.systemPrompt.section()` 注册一个有序的提示词段落，作用域是本插件
+  // 所在的上下文（根上下文 = 全局，对所有 Agent 生效）。返回的 disposer 直接
+  // 交给 ctx.effect —— **插件一停用段落立刻消失**，正好对应「这个插件打开的时候」。
+  //
+  // order 取一个大数让它落到靠后位置：越靠后的段落对模型的约束力越强，
+  // 而这条指令是「说话方式」层面的，适合放在具体任务说明之后。
+  ctx.effect(() => {
+    if (config?.thinkInChinese === false) return
+    return ctx.systemPrompt.section({
+      name: PROMPT_LANGUAGE_SECTION,
+      order: PROMPT_LANGUAGE_ORDER,
+      text: PROMPT_LANGUAGE_TEXT,
+    })
+  }, 'dsh-live2d: think in Chinese')
+
   // 主动说话：桌宠开着才有意义 —— 没有窗口时说话也没人看得见。
   // 配置成 off 就不启动，省掉那些模型调用。
   ctx.effect(() => {
@@ -2407,6 +2450,31 @@ export function apply(ctx, config) {
         },
         doneHoldMs: STATUS.doneHoldMs,
       })
+    }
+
+    // 「让模型用中文思考」这条提示词段落的探针。
+    // 段落注册进 systemPrompt 之后**没有别的办法从外面确认它真的进去了** ——
+    // 唯一的证据就是跑一次真实的 assemble()，看结果里有没有它。
+    if (pathname === '/live2d/probe-prompt') {
+      const q = new URL(req.url, 'http://localhost').searchParams
+      try {
+        const assembly = await ctx.systemPrompt.assemble()
+        const names = assembly.sections.map((s) => s.name)
+        const mine = assembly.sections.find((s) => s.name === PROMPT_LANGUAGE_SECTION)
+        const out = {
+          ok: true,
+          sectionCount: assembly.sections.length,
+          index: mine === undefined ? -1 : names.indexOf(PROMPT_LANGUAGE_SECTION),
+          present: mine !== undefined,
+          text: q.get('full') === '1' ? (mine?.text ?? null) : (mine?.text?.split('\n')[0] ?? null),
+          sections: names,
+        }
+        // 顺带把渲染后的完整提示词吐出来，便于人工核对是否真的生效
+        if (q.get('full') === '1') out.rendered = assembly.sections.map((s) => s.text).join('\n\n')
+        return sendJson(res, 200, out)
+      } catch (error) {
+        return sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
     }
 
     // 桌宠退场前上报原因。有了它，Host 才能区分「用户按了 Esc」和「它自己死的」——
