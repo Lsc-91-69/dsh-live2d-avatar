@@ -42,6 +42,7 @@ try {
 [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
 [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
 [DllImport("user32.dll")] public static extern uint GetDpiForSystem();
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
 [DllImport("shcore.dll")] public static extern int GetProcessDpiAwareness(IntPtr h, out int value);
 '@ -ErrorAction Stop
   # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4（按指针值传）
@@ -66,6 +67,7 @@ Add-Type -Namespace Dsh -Name Top -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 // 往上找根窗口。WindowFromPoint 命中的是**最上层的子窗口**，而我们的窗口里铺着
 // WebView2，它的子 HWND 属于 msedgewebview2.exe —— 拿子窗口去比 PID 永远不等。
@@ -82,6 +84,8 @@ public const uint SWP_SHOWWINDOW = 0x0040;
 public const int GWL_EXSTYLE = -20;
 public const int WS_EX_NOACTIVATE = 0x08000000;
 public const int WS_EX_TOOLWINDOW = 0x00000080;
+  // 鼠标穿透：这个窗口不参与命中测试，点击直接落到下面那层
+  public const int WS_EX_TRANSPARENT = 0x00000020;
 [DllImport("dwmapi.dll")] public static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
 [StructLayout(LayoutKind.Sequential)] public struct MARGINS { public int LeftWidth; public int RightWidth; public int TopHeight; public int BottomHeight; }
 '@ -ErrorAction Stop
@@ -197,11 +201,56 @@ function Pump-For {
 # 声明 DPI 感知后，WinForms 的 Size/Location 都按**逻辑像素**解释，
 # 由系统换算成物理像素。所以这里保持逻辑值即可；但缩放比例要记下来，
 # 用于给用户显示「实际物理尺寸」以及滚轮缩放的步进。
-$scale = 1.0
+# 这里只拿一个**开机估值**：此刻窗口还没建出来，没有 HWND 可问，只能先按系统 DPI 撑个尺寸。
+# 真的缩放必须在拿到 HWND 之后用 GetDpiForWindow 现算 —— 见下面的 Get-Scale。
+$script:appliedScale = 1.0
+# 用户滚轮放大的倍数。跨屏重设窗口时必须乘回去 ——
+# 否则 Sync-Size 会把窗口弹回初始尺寸，等于悄悄吃掉用户的缩放。
+$script:zoomK = 1.0
 try {
-  $sysDpi = [Dsh.Dpi]::GetDpiForSystem()
-  if ($sysDpi -gt 0) { $scale = $sysDpi / 96.0 }
-} catch { $scale = 1.0 }
+  $bootDpi = [Dsh.Dpi]::GetDpiForSystem()
+  if ($bootDpi -gt 0) { $script:appliedScale = $bootDpi / 96.0 }
+} catch { $script:appliedScale = 1.0 }
+
+<#
+当前窗口所在那块屏的缩放（1.0 / 1.5 / 2.0 …）。
+
+**必须现算，不能缓存。** 之前的写法是启动时 GetDpiForSystem() 算一次存进 $scale，
+那个值是"系统 DPI"= 主显示器的 DPI，窗口在副屏时会算错；而且窗口被拖到另一块
+不同缩放的屏上之后也不会更新。两个症状都表现为"拖动又开始不同步"：
+  · 主屏 100% / 副屏 150%，桌宠在副屏启动 → 缩放算成 1.0，窗口只走鼠标的 2/3
+  · 拖动跨到另一块屏 → 缩放还是旧的，立刻退回同样的毛病
+GetDpiForWindow 问的是**这个 HWND 当前所在显示器**，一次 P/Invoke，开销可以忽略。
+#>
+function Get-Scale {
+  try {
+    if ($form -and $form.Handle -ne [IntPtr]::Zero) {
+      $d = [Dsh.Dpi]::GetDpiForWindow($form.Handle)
+      if ($d -gt 0) { return $d / 96.0 }
+    }
+  } catch { }
+  return $script:appliedScale
+}
+
+<#
+跨屏之后把窗口尺寸重新套一遍（物理尺寸 = 逻辑尺寸 × 该屏缩放）。
+
+不处理 WM_DPICHANGED 也能做到这件事：直接按当前 HWND 的 DPI 比对，变了就重设。
+比子类化 WndProc 稳，也不依赖 WinForms 对无边框窗口的行为。
+#>
+function Sync-Size {
+  $s = Get-Scale
+  if ([math]::Abs($s - $script:appliedScale) -lt 0.001) { return }
+  $script:appliedScale = $s
+  $w = [int][math]::Round($Width * $script:zoomK * $s)
+  $h = [int][math]::Round($Height * $script:zoomK * $s)
+  $script:physW = $w
+  $script:physH = $h
+  try {
+    $form.Size = New-Object System.Drawing.Size($w, $h)
+    Log "DPI 变成 $([math]::Round($s*100))%，窗口重设为 ${w}x${h}"
+  } catch { }
+}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'DSH Live2D'
@@ -217,10 +266,10 @@ $form.MinimumSize = New-Object System.Drawing.Size(160, 200)
 # 必须乘上缩放：否则 340 物理像素在 150% 下只有 227 逻辑像素，窗口看着变小。
 # 乘完之后物理窗口 = 510×690，页面 CSS 视口回到 340×460，
 # canvas 后备缓冲 510×690 与屏幕 1:1 —— 这正是「原版精度」。
-$physW = [int][math]::Round($Width * $scale)
-$physH = [int][math]::Round($Height * $scale)
-$form.Size = New-Object System.Drawing.Size($physW, $physH)
-Log "窗口尺寸：逻辑 ${Width}x${Height} → 物理 ${physW}x${physH}（DPI 缩放 $([math]::Round($scale*100))%）"
+$script:physW = [int][math]::Round($Width * $script:appliedScale)
+$script:physH = [int][math]::Round($Height * $script:appliedScale)
+$form.Size = New-Object System.Drawing.Size($script:physW, $script:physH)
+Log "窗口尺寸：逻辑 ${Width}x${Height} → 物理 $($script:physW)x$($script:physH)（开机估值 DPI 缩放 $([math]::Round($script:appliedScale*100))%）"
 
 # 记位置，下次开在同一处（存 %LOCALAPPDATA%）
 #
@@ -289,6 +338,23 @@ Log "WebView2 运行时: $($env2.BrowserVersionString)（已放行自动播放�
 
 $form.Show()
 Pump-For 250
+
+# 句柄现在才存在，这时候问到的才是「窗口所在那块屏」的 DPI。
+# 开机估值用的是系统 DPI（主屏），桌宠开在副屏或副屏缩放不同时那一步是错的。
+Sync-Size
+
+# 跨屏不会自动通知我们（没子类化 WndProc），用个 1 秒的钟盯着就够 ——
+# 只在缩放真的变了才重设窗口，平时只是一次 P/Invoke。
+$script:dpiWatch = New-Object System.Windows.Forms.Timer
+$script:dpiWatch.Interval = 1000
+$script:dpiWatch.Add_Tick({ Sync-Size })
+$script:dpiWatch.Start()
+
+# 穿透判定：120ms 一次。拖动/缩放期间光标一定在人身上，天然不会误触发。
+$script:passWatch = New-Object System.Windows.Forms.Timer
+$script:passWatch.Interval = 120
+$script:passWatch.Add_Tick({ Update-PassThrough })
+$script:passWatch.Start()
 
 # 开启 DWM 透明：把整个客户区交给 DWM 合成（MARGINS 全 -1 = 铺满）。
 # 必须在窗口显示之后调用；只对非分层窗口有效（正是我们要的）。
@@ -366,12 +432,12 @@ Log "已加载 $Url/live2d/pet"
 # 会接走所有鼠标事件，Form 的鼠标事件**永远不触发** —— 早先那段拖动代码从未生效。
 # 所以拖动必须在页面里发起，通过 WebViewMessageReceived 传进来。
 #
-# **dx/dy 是 CSS 像素，必须乘 $scale 换成物理像素。**
+# **dx/dy 是 CSS 像素，必须乘 DPI 缩放换成物理像素。**
 #
 # 原先这里写着「screenX/screenY 是屏幕物理坐标，不用乘 DPI 缩放」—— 这句是错的。
 # 按 CSSOM View 规范，MouseEvent.screenX/screenY 的单位是 **CSS 像素**，不是物理像素。
-# 而本窗口为了「原版精度」把物理尺寸设成了 逻辑×$scale（见上面第 3 节），
-# 于是页面 CSS 视口是 340×460、物理窗口是 510×690，devicePixelRatio = $scale = 1.5。
+# 而本窗口为了「原版精度」把物理尺寸设成了 逻辑×缩放（见上面第 3 节），
+# 于是页面 CSS 视口是 340×460、物理窗口是 510×690，devicePixelRatio = 缩放 = 1.5。
 # 结果：鼠标实际移动 150 物理像素，screenX 只增加 100；而 $form.Location 是物理像素，
 # 加 100 就只走了 100 —— **窗口位移只有鼠标的 2/3**，越拖越落后。
 #
@@ -381,15 +447,77 @@ $script:lastDragLog = [datetime]::MinValue
 $script:dragResidualX = 0.0
 $script:dragResidualY = 0.0
 
+# ── 5b. 空白处穿透 ────────────────────────────────────────────────────────
+#
+# 窗口是透明铺满的，WebView2 会把整个矩形的鼠标都吃掉：在她的空白处点一下，
+# 什么也不会发生，桌面上被盖住的东西反而点不到 —— 对桌宠来说这很不对。
+#
+# 做法：页面把「身体的可点矩形」报过来（css 像素，和戳击/拖动同一个判据），
+# 外壳每 120ms 看一次光标在不在这个矩形里，不在就把 WS_EX_TRANSPARENT 挂上。
+# 挂上之后窗口完全不参与命中测试，点击直接落到下一层。
+#
+# 为什么不用 WM_NCHITTEST 返回 HTTRANSPARENT：那需要子类化 WndProc，
+# 在 PowerShell 里代价高、还容易和 WinForms 自己的消息处理打架。
+# 轮询一次 GetCursorPos 便宜得多，而且能顺手处理「窗口被拖走/换 DPI」。
+$script:hitbox = $null          # 页面报来的可点矩形（CSS 像素）
+$script:mask = $null            # 页面报来的轮廓位图 { cols, rows, bits }
+$script:passThrough = $false    # 当前是否已挂上穿透
+
+function Set-PassThrough {
+  param([bool]$On)
+  if ($script:passThrough -eq $On) { return }
+  $script:passThrough = $On
+  try {
+    $ex = [Dsh.Top]::GetWindowLong($form.Handle, [Dsh.Top]::GWL_EXSTYLE)
+    if ($On) { $ex = $ex -bor [Dsh.Top]::WS_EX_TRANSPARENT }
+    else { $ex = $ex -band (-bnot [Dsh.Top]::WS_EX_TRANSPARENT) }
+    [void][Dsh.Top]::SetWindowLong($form.Handle, [Dsh.Top]::GWL_EXSTYLE, $ex)
+  } catch { }
+}
+
+function Update-PassThrough {
+  if ($null -eq $script:hitbox) { return }
+  try {
+    $pt = New-Object Dsh.Top+POINT
+    if (-not [Dsh.Top]::GetCursorPos([ref]$pt)) { return }
+    # 光标换算成窗口内的 CSS 像素（页面报来的矩形就是这个坐标系）
+    $dpiScale = Get-Scale
+    if ($dpiScale -le 0) { return }
+    $cx = ($pt.X - $form.Location.X) / $dpiScale
+    $cy = ($pt.Y - $form.Location.Y) / $dpiScale
+    $h = $script:hitbox
+    $inside = ($cx -ge $h.x -and $cx -le ($h.x + $h.w) -and $cy -ge $h.y -and $cy -le ($h.y + $h.h))
+
+    # 有轮廓就按轮廓判：矩形四角明明空着，却也会吃掉点击。
+    # 轮廓采不到（页面那边读不回 alpha）时 $inside 保持矩形结果 —— 粗一点也认了。
+    $m = $script:mask
+    if ($inside -and $null -ne $m -and $m.cols -gt 0) {
+      $mx = [int][math]::Floor(($cx - $h.x) / $h.w * $m.cols)
+      $my = [int][math]::Floor(($cy - $h.y) / $h.h * $m.rows)
+      if ($mx -lt 0) { $mx = 0 }
+      if ($mx -ge $m.cols) { $mx = $m.cols - 1 }
+      if ($my -lt 0) { $my = 0 }
+      if ($my -ge $m.rows) { $my = $m.rows - 1 }
+      $inside = ($m.bits.Substring($my * $m.cols + $mx, 1) -eq '1')
+    }
+
+    Set-PassThrough (-not $inside)
+  } catch { }
+}
+
 $controller.CoreWebView2.Add_WebMessageReceived({
   param($s, $e)
   try {
     $msg = $e.WebMessageAsJson | ConvertFrom-Json
     switch ($msg.type) {
       'drag' {
-        # CSS 像素 → 物理像素，带上一次没走完的零头
-        $rawX = ([double]$msg.dx * $scale) + $script:dragResidualX
-        $rawY = ([double]$msg.dy * $scale) + $script:dragResidualY
+        # CSS 像素 → 物理像素，带上一次没走完的零头。
+        # 缩放**现算**：窗口可能刚被拖到另一块不同 DPI 的屏上，
+        # 沿用启动时的旧值就会立刻退回"窗口位移只有鼠标的 2/3"。
+        # （变量不能叫 $s —— 那是上面 param 里的 sender。）
+        $dpiScale = Get-Scale
+        $rawX = ([double]$msg.dx * $dpiScale) + $script:dragResidualX
+        $rawY = ([double]$msg.dy * $dpiScale) + $script:dragResidualY
         $dx = [int][math]::Round($rawX)
         $dy = [int][math]::Round($rawY)
         $script:dragResidualX = $rawX - $dx
@@ -401,7 +529,23 @@ $controller.CoreWebView2.Add_WebMessageReceived({
         # 拖动日志按秒节流，否则会把日志刷爆
         if (((Get-Date) - $script:lastDragLog).TotalSeconds -gt 1) {
           $script:lastDragLog = Get-Date
-          Log "拖动 → 窗口位置 $($form.Location.X),$($form.Location.Y)（本次 d=${dx},${dy} 物理 / $($msg.dx),$($msg.dy) CSS）"
+          Log "拖动 → 窗口位置 $($form.Location.X),$($form.Location.Y)（本次 d=${dx},${dy} 物理 / $($msg.dx),$($msg.dy) CSS，缩放 $([math]::Round($dpiScale*100))%）"
+        }
+      }
+      'hitbox' {
+        # 页面报来身体的可点矩形（CSS 像素）。null 表示"还没布局好"，保持现状。
+        $script:hitbox = @{
+          x = [double]$msg.x; y = [double]$msg.y
+          w = [double]$msg.w; h = [double]$msg.h
+        }
+      }
+      'mask' {
+        # 轮廓位图：rows 行 cols 列，bits 是 '0'/'1' 串。cols=0 表示这次没采到。
+        $bits = [string]$msg.bits
+        if ([int]$msg.cols -gt 0 -and $bits.Length -eq ([int]$msg.cols * [int]$msg.rows)) {
+          $script:mask = @{ cols = [int]$msg.cols; rows = [int]$msg.rows; bits = $bits }
+        } else {
+          $script:mask = $null
         }
       }
       'zoom' {
@@ -412,8 +556,11 @@ $controller.CoreWebView2.Add_WebMessageReceived({
         $newW = [Math]::Max(160, [Math]::Min(2000, $newW))
         $newH = [Math]::Max(200, [Math]::Min(2400, $newH))
         $form.Size = New-Object System.Drawing.Size($newW, $newH)
+        # 用**实际落到的尺寸**反推倍数：被 Max/Min 夹过之后，按 8% 递增推会算错。
+        $curScale = Get-Scale
+        if ($curScale -gt 0) { $script:zoomK = [double]$form.Width / ($Width * $curScale) }
         & $syncBounds
-        Log "缩放 → 物理 ${newW}x${newH}"
+        Log "缩放 → 物理 ${newW}x${newH}（倍数 $([math]::Round($script:zoomK*100))%）"
       }
     }
   } catch {
@@ -548,3 +695,10 @@ if ($SelfTestMs -gt 0) {
 [System.Windows.Forms.Application]::Run($form)
 try { $controller.Close() } catch { }
 Log '桌宠已退出。'
+
+
+
+
+
+
+

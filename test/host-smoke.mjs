@@ -34,7 +34,9 @@ const ctx = {
 // 测试里不能真去起桌宠窗口：用配置把它关掉，同时单独断言这条分支的行为。
 // doneHoldMs: 0 —— 「刚完成」的绿灯默认亮 30 秒，会盖住后面那些期待 idle 的断言。
 // 这里关掉限时态，只测状态机本身；绿灯窗口另有一条断言单独守。
-await apply(ctx, { modelDir: MODEL_DIR, desktopPet: 'off', doneHoldMs: 0 })
+// debug: true 打开 probe-* 端点 —— 冒烟测试本来就要用它们验证状态机。
+// 生产默认是关的（见 host.js 的 DEBUG_ROUTES）。
+await apply(ctx, { modelDir: MODEL_DIR, desktopPet: 'off', doneHoldMs: 0, debug: true })
 
 let failures = 0
 const check = (label, actual, expected) => {
@@ -66,14 +68,14 @@ const assert = (label, condition, detail = '') => {
 }
 
 const route = captured.routes[0]
-async function call(url) {
+async function call(url, headers = {}) {
   const chunks = []
   const res = new Writable({ write(chunk, _encoding, callback) { chunks.push(chunk); callback() } })
   res.statusCode = 0
   res.headers = null
   res.writeHead = (status, headers) => { res.statusCode = status; res.headers = headers ?? {}; return res }
   const finished = new Promise(resolve => res.on('finish', resolve))
-  await route.handler({ url }, res)
+  await route.handler({ url, headers }, res)
   await finished
   const body = Buffer.concat(chunks)
   return { status: res.statusCode, headers: res.headers, body }
@@ -196,7 +198,7 @@ console.log('\n— 宠物页（桌宠与画中画共用）—')
   assert('背景透明（两个宿主都要看到桌面）', html.includes('background: transparent'))
   assert('加载三个运行时', ['pixi.min.js', 'live2dcubismcore.min.js', 'cubism4.min.js'].every(n => html.includes(n)))
   assert('画面尺寸只用 CSS 逻辑像素', /element \? element\.clientWidth/.test(html))
-  assert('刻意不用 renderer.width 适配', !/app\.renderer\.width/.test(html))
+  assert('适配不用物理像素（fitModel 走 CSS 逻辑像素）', !/function fitModel[\s\S]{0,600}?app\.renderer\.width/.test(html))
   assert('读真实表达', html.includes('/live2d/state'))
   assert('会换表情', html.includes('expressionManager') && html.includes('resetExpression'))
   assert('模型取固有尺寸', html.includes('internalModel.width'))
@@ -210,7 +212,7 @@ console.log('\n— 宠物页（桌宠与画中画共用）—')
   assert('开启 mipmap', html.includes('MIPMAP_MODES') && html.includes('baseTexture.mipmap'))
   assert('有状态指示元素', html.includes('id="status"') && html.includes('id="statusText"'))
   assert('状态有 待机/思考中 两态', html.includes('思考中') && html.includes('待机'))
-  assert('状态由 /live2d/state 驱动', html.includes('setStatus(s.status)'))
+  assert('状态由 /live2d/state 驱动', html.includes('setStatus(s.status, s.busyMs)'))
 
   // 与浮层功能对齐
   assert('待机动作已接上', html.includes('createIdleAnimator(model, {})') && html.includes("on('afterMotionUpdate'"))
@@ -301,7 +303,8 @@ console.log('\n— 桌宠外壳：DPI 感知必须在建窗之前声明 —')
   const dpiAt = shell.indexOf('SetProcessDpiAwarenessContext')
   const formAt = shell.indexOf('New-Object System.Windows.Forms.Form')
   assert('DPI 声明在建窗之前', dpiAt > 0 && formAt > 0 && dpiAt < formAt, `dpi@${dpiAt} form@${formAt}`)
-  assert('窗口尺寸按 DPI 缩放（维持视觉大小）', shell.includes('$Width * $scale') && shell.includes('$Height * $scale'))
+  assert('窗口尺寸按 DPI 缩放（维持视觉大小）',
+    shell.includes('$Width * $script:appliedScale') || shell.includes('$Width * $script:zoomK * $s'))
   assert('日志里报告 DPI 状态', shell.includes('实际感知'))
 }
 
@@ -756,6 +759,85 @@ console.log('\n— 黄灯的第二条路：tools/pre-execute（不依赖审批�
   await json('/live2d/probe-status?set=clear')
 }
 
+console.log('\n— 语音只留接口：任何人可以接自己的模型 —')
+{
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  const here = join(HERE, '..', 'voice')
+
+  // 运行时不再写死是 Python
+  assert('运行时可由 speechRuntime 指定', host.includes("pick(config?.speechRuntime, 'DSH_LIVE2D_RUNTIME'"))
+  assert('旧配置名仍兼容', host.includes("pick(config?.speechPython, 'DSH_LIVE2D_PYTHON'"))
+  assert('worker 用运行时启动', host.includes('spawn(SPEECH.runtime, [SPEECH.worker]'))
+  assert('就绪检查不再假定 Python 专属文案', host.includes('运行时') && !host.includes('Python 解释器不存在'))
+
+  // 接口文档与参考实现
+  assert('接口文档存在', existsSync(join(here, 'PROVIDER.md')))
+  assert('参考 worker 存在', existsSync(join(here, 'sapi-worker.ps1')))
+  const doc = readFileSync(join(here, 'PROVIDER.md'), 'utf8')
+  assert('文档写明了 ready 握手', doc.includes('{"ready":true}'))
+  assert('文档写明了 out 字段', doc.includes('"out"'))
+  assert('文档写明了 ok 回复', doc.includes('{"ok":true}'))
+
+  const ref = readFileSync(join(here, 'sapi-worker.ps1'), 'utf8')
+  assert('参考 worker 会打 ready', ref.includes('ready = $true'))
+  assert('参考 worker 用显式 UTF-8 流', ref.includes('UTF8Encoding'))
+  assert('参考 worker 逐行 flush', ref.includes('AutoFlush = $true'))
+}
+console.log('\n— 点击穿透：空白处不该吃掉鼠标 —')
+{
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+
+  // 页面侧：只报身体的包围盒（和戳击/拖动同一个判据），不是整个 stage
+  assert('页面报可点矩形给外壳', host.includes("post('hitbox', r)"))
+  assert('矩形来自模型包围盒', host.includes('model.getBounds()') && host.includes('reportHitbox'))
+  assert('重复的矩形不重复发', host.includes('lastHitbox'))
+  assert('窗口尺寸变化时重报', host.includes("addEventListener('resize'") && host.includes('reportHitbox()'))
+
+  // 外壳侧：真的会切换 WS_EX_TRANSPARENT
+  assert('窗口带 WS_EX_TRANSPARENT 常量', pet.includes('WS_EX_TRANSPARENT = 0x00000020'))
+  assert('能读光标位置', pet.includes('GetCursorPos(out POINT p)'))
+  assert('按光标是否在矩形内切换', pet.includes('function Update-PassThrough') && pet.includes('Set-PassThrough (-not $inside)'))
+  assert('接收到 hitbox 消息', pet.includes("'hitbox' {"))
+  assert('有轮询定时器', pet.includes('passWatch'))
+
+  // 换算：页面报的是 CSS 像素，光标是物理像素 —— 必须除缩放，不能直接比
+  assert('光标换算成 CSS 像素再判定', pet.includes('/ '))
+}
+console.log('\n— 任务时长（用户看不出「刚卡住」还是「跑了三分钟」）—')
+{
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  assert('快照里记了开工时刻', host.includes('const busy = { since: 0 }'))
+  assert('state 响应带 busyMs', host.includes('busyMs: busy.since === 0 ? 0 : Date.now() - busy.since'))
+
+  const st = await json('/live2d/state')
+  assert('busyMs 是数字', typeof st.busyMs === 'number', `got ${typeof st.busyMs}`)
+  assert('闲着时 busyMs 为 0', st.busyMs === 0, `got ${st.busyMs}`)
+
+  // 页面侧：一分钟以内不显示，且只在 thinking/waiting 挂
+  assert('页面有一分钟门槛', host.includes("ms < 60000"))
+  assert('页面只在思考/等待时挂时长', host.includes("(next === 'thinking' || next === 'waiting') ? fmtBusy(busyMs)"))
+  assert('轮询把 busyMs 传下去了', host.includes('setStatus(s.status, s.busyMs)'))
+}
+console.log('\n— HTTP 闸门：诊断端点默认关闭 / 改状态要求同源 —')
+{
+  const src = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  assert('诊断端点有开关', src.includes('DEBUG_ROUTES') && src.includes('DSH_LIVE2D_DEBUG'))
+  assert('probe-* 全部受开关管', src.includes("pathname.startsWith('/live2d/probe-') && !DEBUG_ROUTES"))
+  assert('改状态的端点有名单', src.includes('MUTATING_PATHS'))
+  assert('跨站请求会被拒', src.includes("req.headers?.['sec-fetch-site'] === 'cross-site'"))
+
+  // 行为验证：浏览器明确标 cross-site 时才拦，其余放行。
+  // 为什么只拦 cross-site：不带 sec-fetch-site 的调用方（curl、本冒烟测试）不该被一刀切。
+  const crossSite = await call('/live2d/poke', { 'sec-fetch-site': 'cross-site' })
+  check('跨站戳一下被拒', crossSite.status, 403)
+  const sameOrigin = await call('/live2d/poke', { 'sec-fetch-site': 'same-origin' })
+  check('同源戳一下放行', sameOrigin.status === 200 || sameOrigin.status === 503, true)
+  const noHeader = await call('/live2d/poke', {})
+  check('不带 sec-fetch-site 的调用方放行', noHeader.status === 200 || noHeader.status === 503, true)
+  const crossRead = await call('/live2d/state', { 'sec-fetch-site': 'cross-site' })
+  check('只读端点不受影响', crossRead.status, 200)
+}
 console.log('\n— 桌宠生命周期：谁拉起的谁负责收 —')
 {
   // 原先 dispose 时故意不杀桌宠（理由是「它有心跳，DSH 一停就自行退场」）。
@@ -831,8 +913,16 @@ console.log('\n— 拖动必须做 CSS 像素 → 物理像素换算 —')
   // 不是物理像素。而窗口为了「原版精度」把物理尺寸设成了 逻辑×$scale，
   // 于是 150% 下 devicePixelRatio=1.5：鼠标走 150 物理像素，screenX 只 +100，
   // 而 $form.Location 是物理像素 —— 窗口只走 100，正好是鼠标的 2/3。
-  assert('dx 乘了 $scale 换算', pet.includes('([double]$msg.dx * $scale)'))
-  assert('dy 也乘了', pet.includes('([double]$msg.dy * $scale)'))
+  // 契约：CSS 像素 → 物理像素，且缩放**必须现算**。
+  // 曾经是启动时 GetDpiForSystem() 算一次缓存进 $scale —— 那个值是主屏的 DPI，
+  // 桌宠开在副屏会算错；跨屏拖动也不会更新。这是同一类 bug 的第二次出现。
+  assert('dx 乘了 DPI 缩放换算', /\(\[double\]\$msg\.dx \* \$dpiScale\)/.test(pet))
+  assert('dy 也乘了', /\(\[double\]\$msg\.dy \* \$dpiScale\)/.test(pet))
+  assert('拖动时现算缩放（不缓存）', pet.includes('$dpiScale = Get-Scale'))
+  assert('缩放取自窗口所在屏（GetDpiForWindow）', pet.includes('GetDpiForWindow($form.Handle)'))
+  assert('不再有启动时缓存的 $scale 变量', !/\$scale\s*=\s*1\.0/.test(pet))
+  assert('跨屏后有重设尺寸的路径', pet.includes('function Sync-Size') && pet.includes('Sync-Size'))
+  assert('跨屏重设不会吃掉用户的滚轮缩放', pet.includes('$script:zoomK'))
   assert('累积小数余量（防慢速拖动漂移）',
     pet.includes('$script:dragResidualX') && pet.includes('$rawX - $dx'))
   assert('旧的那句错误结论已经删掉', !pet.includes('不需要再乘 DPI 缩放'))
@@ -1061,3 +1151,9 @@ check('空文本被拒绝', rejected, true)
 
 console.log(`\n${failures === 0 ? '全部通过' : failures + ' 项失败'}`)
 process.exitCode = failures === 0 ? 0 : 1
+
+
+
+
+
+

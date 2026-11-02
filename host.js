@@ -291,11 +291,24 @@ ${engine}
    *   waiting  等你操作 黄（快脉冲）← 权限申请 / 问卷
    *   done     完成了   绿（常亮）
    */
-  function setStatus(next) {
+  /**
+   * 已用时的人类读法。一分钟以内不显示 —— 刚开工就说「已 0 分」是噪音。
+   */
+  function fmtBusy(ms) {
+    if (!ms || ms < 60000) return '';
+    var min = Math.floor(ms / 60000);
+    if (min < 60) return '已 ' + min + ' 分';
+    return '已 ' + Math.floor(min / 60) + ' 时 ' + (min % 60) + ' 分';
+  }
+
+  function setStatus(next, busyMs) {
     var map = {
       idle: '待机', thinking: '思考中', waiting: '等你操作', done: '完成了'
     };
-    statusText.textContent = map[next] || '待机';
+    var label = map[next] || '待机';
+    // 只在这两种状态挂时长：闲着和刚完成都没在跑活，挂上去是误导
+    var extra = (next === 'thinking' || next === 'waiting') ? fmtBusy(busyMs) : '';
+    statusText.textContent = extra ? (label + ' · ' + extra) : label;
     statusEl.classList.remove('thinking', 'waiting', 'done');
     if (next === 'thinking' || next === 'waiting' || next === 'done') {
       statusEl.classList.add(next);
@@ -309,11 +322,101 @@ ${engine}
    * 在窗口变大时会让状态栏离人物越来越远。这里直接问模型的包围盒，
    * 把它放在人物上沿再往上一点的位置。
    */
+  /**
+   * 告诉外壳「现在哪些地方可以被点」。
+   *
+   * 窗口是透明铺满的，WebView2 会把整个矩形的鼠标都吃掉 —— 于是在她的空白处
+   * 点一下，什么也不会发生，桌面上的东西反而点不到。留给外壳一个矩形，
+   * 它按光标位置切换穿透，空白处就真的"不存在"了。
+   *
+   * 只报身体的包围盒（和戳击/拖动用的是同一个判据），不报整页。
+   */
+  /**
+   * 用低分辨率 alpha 采样出"哪些格子是她的"。
+   *
+   * 只报一个包围盒的话，矩形四角那些明显空着的地方也会吃掉点击 ——
+   * 实测整块窗口除了上下两条边几乎全是可点区。要真的做到"只有身体"，
+   * 得让外壳知道轮廓，而不是外框。
+   *
+   * 走 renderer.extract 而不是 drawImage(app.view)：这个页面的 WebGL 画布
+   * 没开 preserveDrawingBuffer，直接读回来是空的。extract 会显式渲到
+   * 帧缓冲再读，绕开这个限制。
+   *
+   * 任何一步出问题都返回 null —— 调用方退回矩形。宁可粗一点，也不能让她点不着。
+   */
+  function sampleMask(cols, rows) {
+    if (!app || !model) return null;
+    try {
+      var scr = app.renderer.screen;   // 逻辑像素；用 renderer.width 是物理像素，会只截到左上角一块
+      var rect = new window.PIXI.Rectangle(0, 0, scr.width, scr.height);
+      var src = app.renderer.extract.canvas(app.stage, rect);
+      if (!src) return null;
+      var c = document.createElement('canvas');
+      c.width = cols; c.height = rows;
+      var g = c.getContext('2d', { willReadFrequently: true });
+      g.clearRect(0, 0, cols, rows);
+      g.drawImage(src, 0, 0, cols, rows);
+      var d = g.getImageData(0, 0, cols, rows).data;
+      // 先按 alpha 出原始格子
+      var raw = new Array(cols * rows);
+      var lit = 0;
+      for (var i = 0; i < cols * rows; i++) {
+        var on = d[i * 4 + 3] > 28;
+        raw[i] = on;
+        if (on) lit++;
+      }
+      // 向外扩一格（3x3 邻域取或）。不扩的话，光标压在她头发/尾巴边缘
+      // 常被判成"空白"，手一抖就点不到了 —— 宁可多认一点。
+      var bits = '';
+      for (var y = 0; y < rows; y++) {
+        for (var x = 0; x < cols; x++) {
+          var any = false;
+          for (var dy = -1; dy <= 1 && !any; dy++) {
+            for (var dx = -1; dx <= 1 && !any; dx++) {
+              var nx = x + dx, ny = y + dy;
+              if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && raw[ny * cols + nx]) any = true;
+            }
+          }
+          bits += any ? '1' : '0';
+        }
+      }
+      // 全空（读回来是黑的）或几乎全满（读回来是实的）都不可信 —— 宁可不用
+      if (lit < cols * rows * 0.05 || lit > cols * rows * 0.92) return null;
+      return { cols: cols, rows: rows, bits: bits };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  var MASK_COLS = 12;
+  var MASK_ROWS = 16;
+  var lastHitbox = null;
+  function reportHitbox() {
+    if (!model || !stage) return;
+    var b;
+    try { b = model.getBounds(); } catch (e) { return; }
+    if (!b || !(b.height > 0)) return;
+    var pad = 6;
+    var r = {
+      x: Math.round(b.x - pad), y: Math.round(b.y - pad),
+      w: Math.round(b.width + pad * 2), h: Math.round(b.height + pad * 2),
+    };
+    if (lastHitbox && lastHitbox.x === r.x && lastHitbox.y === r.y
+        && lastHitbox.w === r.w && lastHitbox.h === r.h) return;
+    lastHitbox = r;
+    post('hitbox', r);
+    // 轮廓随模型一起报。采不到就发空的，外壳会退回矩形。
+    var m = sampleMask(MASK_COLS, MASK_ROWS);
+    post('mask', m || { cols: 0, rows: 0, bits: '' });
+  }
+  window.addEventListener('resize', function () { reportHitbox(); });
+
   function placeStatus() {
     if (!model || !stage || !statusEl) return;
     var b;
     try { b = model.getBounds(); } catch (e) { return; }
     if (!b || !(b.height > 0)) return;
+    reportHitbox();
     // 头顶再往上 30px；但不越出窗口上沿（至少留 8px）
     var top = Math.max(8, b.y - 30);
     var left = Math.max(8, Math.min(b.x + 6, stage.clientWidth - 90));
@@ -541,6 +644,12 @@ ${engine}
     new ResizeObserver(fit).observe(stage);
     hint.style.display = 'none';
 
+    // 这里才采得到完整轮廓。placeStatus 在模型就绪前就会跑一次，
+    // 那时 extract 拿到的是半张图 —— 结果是"她的身体被判成空白"，
+    // 比不做轮廓还糟。所以：就绪后补采一次，之后低频跟着刷新。
+    reportHitbox();
+    try { setInterval(reportHitbox, 3000); } catch (e) { }
+
     // 先把状态挂出去，再做其余初始化。
     // 之前 __pet 放在 createIdleAnimator 之后，那一步一旦抛错就永远不赋值 ——
     // 画面是好的、探针却报 undefined，我被这个顺序骗过一次。
@@ -572,7 +681,7 @@ ${engine}
         var s = await (await fetch('/live2d/state', { cache: 'no-store' })).json();
         window.__pollCount++;
         window.__lastPollError = null;
-        if (typeof s.status === 'string') { window.__petStatus = s.status; setStatus(s.status); }
+        if (typeof s.status === 'string') { window.__petStatus = s.status; setStatus(s.status, s.busyMs); }
         // 音频要在**每次轮询**都看一眼，不能只在 revision 变化时看：
         // 碎碎念不改 state.message，也就不会推 revision，绑在一起就会漏播。
         // playAudio 自己按 audio.id 判重，所以每轮调用是安全的。
@@ -771,10 +880,14 @@ export function apply(ctx, config) {
     dir: VOICE_DIR,
     script: pick(config?.speechScript, 'DSH_LIVE2D_SPEAK_PY', join(VOICE_DIR, 'speak.py')),
     worker: pick(config?.speechWorker, 'DSH_LIVE2D_WORKER_PY', join(VOICE_DIR, 'worker.py')),
-    // Python 解释器必须自带 torch —— 没有通用默认值，只能由用户指定。
-    // 留空字符串而不是瞎猜一个路径，这样 speechReady() 能报「缺 python」而不是
-    // 报一个看不懂的 spawn 失败。
-    python: pick(config?.speechPython, 'DSH_LIVE2D_PYTHON', ''),
+    // 跑 worker 的运行时。**不限于 Python** —— 任何人写一个说同一套协议的可执行
+    // 程序都能接进来（node / pwsh / 你自己训练好的模型附带的启动器）。
+    // 配置项仍读 speechPython 作为旧名兼容，语义已经是"运行时"了。
+    //
+    // 留空字符串而不是瞎猜路径：这样 speechMissing() 能报「缺运行时」，
+    // 而不是抛一个看不懂的 spawn 失败。
+    runtime: pick(config?.speechRuntime, 'DSH_LIVE2D_RUNTIME',
+      pick(config?.speechPython, 'DSH_LIVE2D_PYTHON', '')),
     // 隔离依赖目录：系统 Python 里通常没有 soundfile / pyworld / soxr 等，
     // 必须显式注入，否则 worker 一启动就 ImportError。
     pythonPath: pick(config?.speechPythonPath, 'DSH_LIVE2D_PYTHONPATH',
@@ -799,12 +912,22 @@ export function apply(ctx, config) {
    * 存在的意义：worker 起不来时现象只是「永远不出声」，看不出原因。
    * 与其让用户对着一个哑巴排查，不如直接说清缺哪个文件/哪一项配置。
    */
+  /**
+   * 语音链路缺什么。
+   *
+   * 这里**只认三样东西**：运行时、worker、文本前端脚本。和语音模型是什么、
+   * 用什么语言写的、训了多少步，全都无关 —— 那是 provider 自己的事。
+   * 接口文档见 voice/PROVIDER.md。
+   */
   function speechMissing() {
     const missing = []
-    if (SPEECH.python === '') missing.push('Python 解释器（config.speechPython 或 DSH_LIVE2D_PYTHON）')
-    else if (!existsSync(SPEECH.python)) missing.push(`Python 解释器不存在：${SPEECH.python}`)
-    if (!existsSync(SPEECH.script)) missing.push(`speak.py 不存在：${SPEECH.script}`)
-    if (!existsSync(SPEECH.worker)) missing.push(`worker.py 不存在：${SPEECH.worker}`)
+    if (SPEECH.runtime === '') {
+      missing.push('运行时（config.speechRuntime，或等价的 DSH_LIVE2D_RUNTIME / speechPython）')
+    } else if (!existsSync(SPEECH.runtime)) {
+      missing.push(`运行时不存在：${SPEECH.runtime}`)
+    }
+    if (!existsSync(SPEECH.script)) missing.push(`文本前端脚本不存在：${SPEECH.script}`)
+    if (!existsSync(SPEECH.worker)) missing.push(`语音 worker 不存在：${SPEECH.worker}`)
     return missing
   }
   const speech = {
@@ -923,7 +1046,7 @@ export function apply(ctx, config) {
       }
       let child
       try {
-        child = spawn(SPEECH.python, [SPEECH.worker], {
+        child = spawn(SPEECH.runtime, [SPEECH.worker], {
           windowsHide: true,
           stdio: ['pipe', 'pipe', 'pipe'],
           // 必须显式传环境：worker 依赖 shim/ 与 pkgs/ 里的隔离依赖
@@ -1988,19 +2111,30 @@ export function apply(ctx, config) {
   function leaveWaiting() { statusPhase.waiting = Math.max(0, statusPhase.waiting - 1) }
   function markDone() { statusPhase.doneAt = Date.now() }
 
+  /**
+   * 这一轮活是什么时候开始的。
+   *
+   * 只有四盏灯的话，用户看不出「这是刚卡住还是已经跑了三分钟」——
+   * 而「是不是卡住了」恰恰是盯着桌宠时最想知道的事。
+   * 在快照里顺带记一下起点，页面自己算已用时（页面有 900ms 的轮询，不必另开定时器）。
+   */
+  const busy = { since: 0 }
+
   function statusSnapshot() {
     // 优先级：等你操作 > 正在干活 > 刚完成 > 待机。
     //
     // 「正在干活」必须高于「刚完成」：done 会亮 30 秒，如果这期间又开了新任务，
     // 绿灯还压着蓝灯就成了误导（实测被测试抓出来）。
-    if (statusPhase.waiting > 0) return 'waiting'
+    if (statusPhase.waiting > 0) { if (busy.since === 0) busy.since = Date.now(); return 'waiting' }
     const live = anyAgentRunning()
     const running_ = live !== null ? live : running.size > 0
     if (running_) {
       // 重新开工就清掉 done —— 否则它会在 30 秒窗口里阴魂不散
       statusPhase.doneAt = 0
+      if (busy.since === 0) busy.since = Date.now()
       return 'thinking'
     }
+    busy.since = 0
     if (statusPhase.doneAt > 0 && Date.now() - statusPhase.doneAt < STATUS.doneHoldMs) return 'done'
     return 'idle'
   }
@@ -2128,6 +2262,8 @@ export function apply(ctx, config) {
     return {
       revision: state.revision,
       status: statusSnapshot(),
+      // 这一轮活已经跑了多久（毫秒）。idle 时是 0。格式化交给页面。
+      busyMs: busy.since === 0 ? 0 : Date.now() - busy.since,
       message: state.message,
       updatedAt: state.message === null ? null : state.message.at,
       // 页面靠 audio.id 变化触发播放；没有音频时为 null。
@@ -2386,6 +2522,37 @@ export function apply(ctx, config) {
   }
 
   // ── HTTP 路由 ───────────────────────────────────────────────────────────
+
+  /**
+   * 诊断端点开关。
+   *
+   * probe-* 只给自检和排障用，正常跑插件时一个都不需要 —— 而其中
+   * `probe-prompt?full=1` 会把**整个拼装后的系统提示词**吐回来。以前它一直开着。
+   * 现在默认关，要排查时在 profile 里加 `debug: true`，或设环境变量
+   * DSH_LIVE2D_DEBUG=1 再重启。
+   */
+  const DEBUG_ROUTES = config?.debug === true || process.env.DSH_LIVE2D_DEBUG === '1'
+
+  /**
+   * 会改变状态的端点。它们都是 GET（页面用起来简单），但 GET 不等于没有副作用。
+   *
+   * 任何网页只要 `<img src="http://127.0.0.1:端口/live2d/poke">` 就能触发一次 ——
+   * 响应读不到（没有 CORS 头），可**副作用真的会发生**：桌宠被戳、被关掉、
+   * 状态被改写。所以这些端点要求同源。
+   */
+  const MUTATING_PATHS = new Set([
+    '/live2d/poke',
+    '/live2d/murmur',
+    '/live2d/pet-exit',
+    '/live2d/audio-status',
+    '/live2d/probe-status',
+    '/live2d/probe-speak',
+    '/live2d/probe-reasoning',
+    '/live2d/probe-done',
+    '/live2d/probe-proactive',
+    '/live2d/probe-route',
+  ])
+
   async function handleRoute(req, res) {
     const url = new URL(req.url ?? '/', 'http://localhost')
     let pathname
@@ -2393,6 +2560,21 @@ export function apply(ctx, config) {
       pathname = decodeURIComponent(url.pathname)
     } catch {
       return sendJson(res, 400, { error: 'malformed percent-encoding in path' })
+    }
+
+    // 闸门 1：诊断端点默认关闭
+    if (pathname.startsWith('/live2d/probe-') && !DEBUG_ROUTES) {
+      return sendJson(res, 404, {
+        error: 'diagnostics disabled',
+        hint: '在插件配置里设 debug: true，或设环境变量 DSH_LIVE2D_DEBUG=1 后重启',
+      })
+    }
+
+    // 闸门 2：改状态的端点要求同源。
+    // 只拦浏览器**明确**标成 cross-site 的请求 —— 不带 sec-fetch-site 的
+    // （curl、冒烟测试、老客户端）放行，免得一刀切掉非浏览器调用方。
+    if (MUTATING_PATHS.has(pathname) && req.headers?.['sec-fetch-site'] === 'cross-site') {
+      return sendJson(res, 403, { error: 'cross-site state change rejected' })
     }
 
     if (pathname === '/live2d/state') {
@@ -2533,7 +2715,7 @@ export function apply(ctx, config) {
     }
 
     // 点击反应：页面戳到身体时调它，由 Agent 现场生成一句话。
-    // 用 POST 语义上更准确，但页面用 GET 更简单（无 body、无 CSRF 面）。
+    // 用 POST 语义上更准确，但页面用 GET 更简单。注意：**GET 不等于没有 CSRF 面** ——
     if (pathname === '/live2d/poke') {
       const agents = ctx.get('agents')
       const agent = agents?.roots?.()[0] ?? agents?.list?.()[0]
@@ -2892,3 +3074,14 @@ export function apply(ctx, config) {
     presentCall: args => ({ card: 'generic', title: 'Live2D 表达', kind: 'other', rawInput: args }),
   }), 'dsh-live2d: tool')
 }
+
+
+
+
+
+
+
+
+
+
+
