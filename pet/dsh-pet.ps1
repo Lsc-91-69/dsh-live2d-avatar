@@ -197,6 +197,27 @@ function Pump-For {
   }
 }
 
+# 界面线程兜底：任何未处理异常只记日志，**绝不弹框**。
+#
+# 桌宠是常驻挂件，弹一个模态错误框会把整个桌面挡住 —— 它的存在感不该有这么大。
+# 真实事故：点击穿透的计时器在函数定义之前就启动了，WebView2 初始化那几秒里
+# 每 120ms 抛一次 CommandNotFoundException；WinForms 定时器回调里没人接，
+# 于是每次开机都弹「应用程序的组件中发生了未经处理的异常」。
+#
+# **必须在创建任何控件之前调用**：只要线程上建过一个控件，WinForms 就不允许再改
+# 异常模式（第一次放到了 Application.Run 前面，日志里直接报
+# 「只要在线程上创建了任何控件，则线程异常模式将不能再有任何更改」）。
+try {
+  [System.Windows.Forms.Application]::SetUnhandledExceptionMode(
+    [System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+  [System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $eventArgs)
+    try { Log "界面线程异常（已吞掉，不弹框）：$($eventArgs.Exception.Message)" } catch { }
+  })
+} catch {
+  Log "装界面线程兜底失败：$($_.Exception.Message)"
+}
+
 # ── 3. 窗口 ─────────────────────────────────────────────────────────────────
 # 声明 DPI 感知后，WinForms 的 Size/Location 都按**逻辑像素**解释，
 # 由系统换算成物理像素。所以这里保持逻辑值即可；但缩放比例要记下来，
@@ -347,14 +368,9 @@ Sync-Size
 # 只在缩放真的变了才重设窗口，平时只是一次 P/Invoke。
 $script:dpiWatch = New-Object System.Windows.Forms.Timer
 $script:dpiWatch.Interval = 1000
-$script:dpiWatch.Add_Tick({ Sync-Size })
+$script:dpiWatch.Add_Tick({ try { Sync-Size } catch { } })
 $script:dpiWatch.Start()
 
-# 穿透判定：120ms 一次。拖动/缩放期间光标一定在人身上，天然不会误触发。
-$script:passWatch = New-Object System.Windows.Forms.Timer
-$script:passWatch.Interval = 120
-$script:passWatch.Add_Tick({ Update-PassThrough })
-$script:passWatch.Start()
 
 # 开启 DWM 透明：把整个客户区交给 DWM 合成（MARGINS 全 -1 = 铺满）。
 # 必须在窗口显示之后调用；只对非分层窗口有效（正是我们要的）。
@@ -505,6 +521,16 @@ function Update-PassThrough {
   } catch { }
 }
 
+# 穿透判定：120ms 一次。
+#
+# **必须放在 Update-PassThrough 定义之后。** 上一版它挂在窗口显示那儿（比函数定义早一百行），
+# WebView2 初始化那几秒里每 120ms 抛一次 CommandNotFoundException；WinForms 定时器回调里
+# 没人接这个异常 → 直接弹「未经处理的异常」对话框。桌宠一启动就报错，就是这么来的。
+$script:passWatch = New-Object System.Windows.Forms.Timer
+$script:passWatch.Interval = 120
+$script:passWatch.Add_Tick({ try { Update-PassThrough } catch { } })
+$script:passWatch.Start()
+
 $controller.CoreWebView2.Add_WebMessageReceived({
   param($s, $e)
   try {
@@ -611,7 +637,7 @@ $script:offlineStrikesNeeded = 6   # 6 × 5s = 连续 30 秒探不通才算真�
 
 $heartbeat = New-Object System.Windows.Forms.Timer
 $heartbeat.Interval = 5000
-$heartbeat.Add_Tick({
+$heartbeat.Add_Tick({ try {
   if (Test-Dsh $Url) {
     if ($script:offlineStrikes -gt 0) {
       Log "DSH 探测恢复正常（此前连续失败 $($script:offlineStrikes) 次）"
@@ -642,7 +668,7 @@ $heartbeat.Add_Tick({
     $root = [Dsh.Top]::GetAncestor($hit, [Dsh.Top]::GA_ROOT)
     if ($root -ne $form.Handle) { Assert-TopMost '被其它窗口盖住' }
   } catch { }
-})
+  } catch { } })
 $heartbeat.Start()
 
 Log '桌宠已就位（Ctrl+Q 或 Esc 退出；拖动移动；滚轮缩放）'
@@ -656,7 +682,7 @@ if ($SelfTestMs -gt 0) {
   Log "自检模式：${SelfTestMs}ms 后自动关闭，结果写入 $selfTestFile"
   $probe = New-Object System.Windows.Forms.Timer
   $probe.Interval = [Math]::Max(1500, $SelfTestMs - 1500)
-  $probe.Add_Tick({
+  $probe.Add_Tick({ try {
     $probe.Stop()
     $lines = @("window=$($form.Bounds)", "runtime=$($env2.BrowserVersionString)")
     try {
@@ -688,13 +714,15 @@ if ($SelfTestMs -gt 0) {
     }
     $lines | Set-Content -LiteralPath $selfTestFile -Encoding UTF8
     $form.Close()
-  })
+  } catch { } })
   $probe.Start()
 }
+
 
 [System.Windows.Forms.Application]::Run($form)
 try { $controller.Close() } catch { }
 Log '桌宠已退出。'
+
 
 
 

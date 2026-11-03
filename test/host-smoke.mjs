@@ -759,6 +759,32 @@ console.log('\n— 黄灯的第二条路：tools/pre-execute（不依赖审批�
   await json('/live2d/probe-status?set=clear')
 }
 
+console.log('\n— 桌面挂件绝不能弹错误框（真事故：开机就弹「未经处理的异常」）—')
+{
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+  const petLines = pet.split('\n')
+
+  // 事故复盘：点击穿透的计时器写在窗口显示那儿（比 Update-PassThrough 的定义早一百行），
+  // WebView2 初始化那几秒里每 120ms 冒一次 CommandNotFoundException；
+  // WinForms 定时器回调里没人接这个异常 → 直接弹模态对话框，每次开机必现。
+  const fnAt = petLines.findIndex(l => l.startsWith('function Update-PassThrough'))
+  const timerAt = petLines.findIndex(l => l.indexOf('passWatch = New-Object') >= 0)
+  assert('穿透计时器在函数定义之后启动', fnAt >= 0 && timerAt > fnAt, 'fn@' + fnAt + ' timer@' + timerAt)
+
+  // 光靠"每个回调都记得写 try/catch"不可靠 —— 必须有全局兜底
+  assert('装了界面线程兜底', pet.indexOf('SetUnhandledExceptionMode') >= 0 && pet.indexOf('CatchException') >= 0)
+  assert('兜底只记日志不弹框', pet.indexOf('add_ThreadException') >= 0 && pet.indexOf('已吞掉，不弹框') >= 0)
+
+  const guardAt = petLines.findIndex(l => l.indexOf('SetUnhandledExceptionMode(') >= 0)
+  const runAt = petLines.findIndex(l => l.indexOf('Application]::Run(') >= 0)
+  assert('兜底在消息循环之前装', guardAt >= 0 && runAt > guardAt, 'guard@' + guardAt + ' run@' + runAt)
+
+  // 写新计时器时别忘包 try —— 这里只做提示，真正的保证是上面那个全局兜底
+  const ticks = petLines.filter(l => l.indexOf('.Add_Tick(') >= 0)
+  const wrapped = ticks.filter(l => l.indexOf('try {') >= 0)
+  assert('已知计时器回调多数自带 try', wrapped.length >= ticks.length - 1, wrapped.length + '/' + ticks.length)
+}
+
 console.log('\n— 语音只留接口：任何人可以接自己的模型 —')
 {
   const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
@@ -1151,6 +1177,7 @@ check('空文本被拒绝', rejected, true)
 
 console.log(`\n${failures === 0 ? '全部通过' : failures + ' 项失败'}`)
 process.exitCode = failures === 0 ? 0 : 1
+
 
 
 
