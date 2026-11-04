@@ -605,6 +605,10 @@ ${engine}
   // 现在外壳已声明 Per-Monitor V2 DPI 感知，物理像素如实交给我们，
   // 1:1 渲染就是最清晰的；超采样只会让 GPU 白做工、再被系统缩放一次。
   var SUPERSAMPLE = 1;
+  // 目标帧率。满速 60fps 对一个「坐在角落、多数时候只是轻轻晃」的挂件是浪费：
+  // 实测 WebView2 渲染进程待机就吃掉单核 44%。30fps 对这种缓慢动作看不出差别，
+  // 而 PIXI 传的是真实 dt，动作速度不会变。
+  var TARGET_FPS = 30;
   function resolutionFor() {
     // 仍尊重真实的 devicePixelRatio（高 DPI 下可能是 1.5 / 2），但不人为抬高。
     var dpr = window.devicePixelRatio || 1;
@@ -624,6 +628,22 @@ ${engine}
       resolution: resolutionFor(), resizeTo: stage,
     });
     stage.appendChild(app.view);
+
+    // ── 限帧 + 不可见时停表 ────────────────────────────────────────────
+    //   1) maxFPS=30：待机动作是缓慢摆动，30fps 肉眼看不出，渲染 CPU 直接砍半
+    //   2) visibilitychange：窗口被完全挡住 / 最小化时 WebView2 未必自己停，
+    //      不问就继续满速画 —— 这才是「被盖住还在烧电」的根因
+    // 两个 ticker 都要管：app 那个负责渲染，Ticker.shared 是给模型更新用的
+    try {
+      var sharedTicker = window.PIXI.Ticker && window.PIXI.Ticker.shared;
+      if (app.ticker) app.ticker.maxFPS = TARGET_FPS;
+      if (sharedTicker) sharedTicker.maxFPS = TARGET_FPS;
+      document.addEventListener('visibilitychange', function () {
+        var hidden = document.hidden === true;
+        try { if (app.ticker) { if (hidden) app.ticker.stop(); else app.ticker.start(); } } catch (e) { }
+        try { if (sharedTicker) { if (hidden) sharedTicker.stop(); else sharedTicker.start(); } } catch (e) { }
+      });
+    } catch (e) { /* 限帧失败不该让画面挂掉 */ }
     model = await Live2DModel.from(manifest.modelUrl, { autoInteract: false });
 
     // 贴图缩小时必须开 mipmap，否则线性采样严重走样（第二个糊源）。

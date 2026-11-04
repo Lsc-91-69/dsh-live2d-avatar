@@ -759,6 +759,22 @@ console.log('\n— 黄灯的第二条路：tools/pre-execute（不依赖审批�
   await json('/live2d/probe-status?set=clear')
 }
 
+console.log('\n— 待机功耗（实测渲染进程待机就吃掉单核 44%）—')
+{
+  const html = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+
+  // 满速 60fps 对一个「多数时候只是轻轻晃」的挂件是浪费。30fps 肉眼看不出差别，
+  // 而 PIXI 传的是真实 dt，动作速度不会变。
+  assert('有目标帧率常量', /var TARGET_FPS = \d+/.test(html), (html.match(/var TARGET_FPS = (\d+)/) || [])[1])
+  assert('给 app 的 ticker 限了频', html.includes('app.ticker.maxFPS = TARGET_FPS'))
+  assert('给模型用的 shared ticker 也限了频', html.includes('sharedTicker.maxFPS = TARGET_FPS'))
+
+  // 窗口被完全挡住 / 最小化时 WebView2 未必自己停 —— 不问就继续满速画
+  assert('不可见时停止渲染', html.includes("addEventListener('visibilitychange'") && html.includes('document.hidden'))
+  assert('两个 ticker 都会停', (html.match(/\.stop\(\)/g) || []).length >= 2)
+  assert('限帧失败不会让画面挂掉', /catch \(e\) \{ \/\* 限帧失败/.test(html))
+}
+
 console.log('\n— 桌面挂件绝不能弹错误框（真事故：开机就弹「未经处理的异常」）—')
 {
   const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')

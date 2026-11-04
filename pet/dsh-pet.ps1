@@ -94,6 +94,7 @@ public const int WS_EX_TOOLWINDOW = 0x00000080;
 # 必须写文件，不能只靠 Write-Host：桌宠是被 Host 以 detached 方式拉起的，
 # 它的控制台输出没人看得到。没有这份日志，「静默退出」就等于完全无法诊断。
 $logFile = Join-Path $env:TEMP 'dsh-live2d-pet.log'
+if ($env:DSH_LIVE2D_PET_LOG) { $logFile = $env:DSH_LIVE2D_PET_LOG }
 function Log([string]$Message) {
   $line = "$(Get-Date -Format 'HH:mm:ss.fff') $Message"
   Write-Host $line

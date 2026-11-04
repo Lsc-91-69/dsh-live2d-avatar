@@ -12,6 +12,7 @@
   },
   "scripts": {
     "test": "node test/host-smoke.mjs && node test/zoom-fit.mjs",
+    "test:pet": "node test/pet-coldstart.mjs",
     "check": "node --check host.js && node --check engine.js && node --check entry.js",
     "verify": "npm run check && npm test"
   },
