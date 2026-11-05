@@ -1,0 +1,51 @@
+# 这个文件放在 ci/ 而不是 .github/workflows/ 是**故意的**。
+#
+# 原因：用 OAuth App token 推送时，GitHub 会拒绝任何对 .github/workflows/ 的改动
+#       （"refusing to allow an OAuth App to create or update workflow ... without
+#        'workflow' scope"）。放在 ci/ 就绕开了这个限制，文件本身能正常进版本库。
+#
+# 启用 CI（二选一）：
+#   1) 网页：GitHub 仓库 → Add file → Create new file →
+#      路径填 .github/workflows/verify.yml → 把本文件内容粘进去 → 提交
+#   2) 换一个带 workflow 作用域的凭据：
+#      gh auth login --scopes workflow
+#      然后 git mv ci/verify.yml .github/workflows/verify.yml && git commit && git push
+## 最小可用的门槛：语法能过、冒烟测试能过。
+#
+# 加这条是因为真出过事：commit 3a64c15 在测试还没绿的时候就推上去了，
+# 下一个 commit e372ff2 才补回来。人记得住一时，记不住每次。
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    # 插件本体是跨平台的（宿主 Node 部分），但桌宠外壳是 Windows + WebView2。
+    # 冒烟测试会在没有 WebView2 的机器上跳过外壳相关用例，所以 Linux 也能跑。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 语法
+        run: |
+          node --check host.js
+          node --check engine.js
+          node --check entry.js
+          node --check test/host-smoke.mjs
+      - name: 冒烟测试
+        run: node test/host-smoke.mjs
+      - name: 缩放适配
+        run: node test/zoom-fit.mjs
+      # 真启动一次桌宠外壳（只在 Windows 上跑；Linux 会自动 SKIP）。
+      # 这条是唯一能覆盖「冷启动时的初始化顺序」的测试 —— 之前那个开机弹框
+      # 就是因为没有任何测试真的起过进程才漏掉的。
+      - name: 冷启动（仅 Windows）
+        if: runner.os == 'Windows'
+        run: node test/pet-coldstart.mjs
+
+

@@ -22,7 +22,52 @@
 - **状态**：Host 监听 `agent/status`，会话一进入 running 就显示「思考中」，停下回到「待机」。
 - **交互**：按住拖动、滚轮缩放、点击身体有反应、待机时自己动自己换表情。
 
-## 安装
+## 30 秒装好（推荐）
+
+克隆下来、跑一个脚本、重启 DSH，就完了。
+
+```powershell
+git clone https://github.com/Lsc-91-69/dsh-live2d-avatar.git D:\plugins\dsh-live2d
+cd D:\plugins\dsh-live2d
+pwsh -File .\install.ps1
+```
+
+脚本做三件事，每件都可重复执行，改配置前自动备份：
+
+1. 在 profile 的 `package.json` 里登记 `link:` 依赖
+2. 把 `dsh-live2d-avatar` 加进 `dsh.profile.bundles`
+3. 在 profile 目录跑 `pnpm install`
+
+然后**重启 DSH**，桌宠会自己出现在桌面右下角。
+
+> 没装 PowerShell 7？`winget install Microsoft.PowerShell`。
+> 桌宠外壳必须用它跑（WinForms 的 DPI 感知和 WebView2 Core API 都要它），
+> Host 找不到会明确报错，不会静默失败。
+
+装完确认真的通了：
+
+```powershell
+# 端口在 DSH 窗口标题栏 / 设置里
+Invoke-RestMethod http://127.0.0.1:<端口>/live2d/manifest | ConvertTo-Json -Depth 2
+# ok=true 且 expressions 有 17 项 → 模型也通了
+```
+
+### 出问题了看这里
+
+| 现象 | 先查什么 |
+| --- | --- |
+| 桌面没有形象 | `%TEMP%\dsh-live2d-pet.log` 最后 20 行。最常见是没装 PowerShell 7 或 WebView2 Runtime |
+| 有形象但不动、不换表情 | `manifest` 返回的 `expressions` 是不是空——空说明 `model/` 没拿到 |
+| 启用/停用插件没反应 | 改完 `host.js` 必须停用再启用一次（HMR 不重载 Host 侧代码） |
+| 想关掉桌宠 | 按 Esc，或在插件配置里设 `desktopPet: 'off'` |
+| 拖动跟不上鼠标 | 已知只在跨屏、且两块屏缩放不同时出现；同屏已修好 |
+| 电脑变烫 | 待机渲染已限到 30fps（单核 44%→27%）。还想更省就设 `desktopPet: 'off'` |
+
+---
+
+## 手动安装（不想用脚本时）
+
+### 前置与细节
 
 ### 前置
 
