@@ -23,7 +23,7 @@
 
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { existsSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -94,6 +94,12 @@ const selftestFile = join(tmpdir(), 'dsh-live2d-pet-selftest.txt')
 try { rmSync(selftestFile, { force: true }) } catch { }
 const logFile = join(tmpdir(), `dsh-live2d-coldstart-${process.pid}.log`)
 try { rmSync(logFile, { force: true }) } catch { }
+
+// 故意先灌一个超大日志：验证启动时会把它滚成 .1。
+// 不灌的话「日志无限长」这个问题要等用户跑几个月才暴露。
+try {
+  writeFileSync(logFile, "x".repeat(1.2 * 1024 * 1024))
+} catch { }
 
 console.log('— 真启动一次桌宠（自检 ' + SELFTEST_MS + 'ms）—')
 
@@ -166,7 +172,15 @@ if (self.includes('DOM=')) {
 }
 
 console.log('')
+
+// 日志轮转：预先灌了 1.2MB，启动时应该滚成 .1，原文件回到很小的体积
+const rotated = existsSync(logFile + '.1')
+const logSize = existsSync(logFile) ? readFileSync(logFile).length : 0
+assert('超大日志被滚成 .1', rotated)
+assert('轮转后原日志重新变小', logSize < 200 * 1024, logSize + ' 字节')
+
 console.log(pass + ' 通过 / ' + fail + ' 失败')
 try { rmSync(logFile, { force: true }) } catch { }
 process.exit(fail === 0 ? 0 : 1)
+
 

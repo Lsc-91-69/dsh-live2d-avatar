@@ -984,7 +984,7 @@ export function apply(ctx, config) {
     if (!shouldSpeak(message)) return
     if (speech.pending !== null) speech.dropped += 1
     speech.pending = standalone ? { ...message, standalone: true } : message
-    void speechLoop()
+    void speechLoop() .catch(function (error) { console.warn('[dsh-live2d] 语音循环异常：', error instanceof Error ? error.message : error) })
   }
 
   /** 合成循环：空闲且有活时跑一条。 */
@@ -1026,7 +1026,7 @@ export function apply(ctx, config) {
     } finally {
       speech.busy = false
       // 合成期间又来了新的，接着跑
-      if (speech.pending !== null) void speechLoop()
+      if (speech.pending !== null) void speechLoop() .catch(function (error) { console.warn('[dsh-live2d] 语音循环异常：', error instanceof Error ? error.message : error) })
     }
   }
 

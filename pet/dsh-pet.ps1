@@ -99,7 +99,37 @@ function Log([string]$Message) {
   $line = "$(Get-Date -Format 'HH:mm:ss.fff') $Message"
   Write-Host $line
   try { Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 } catch { }
+  $script:logWrites++
+  if (($script:logWrites % 500) -eq 0) { Rotate-LogIfBig }
 }
+
+# ── 日志轮转 ────────────────────────────────────────────────────────────
+# 不轮转的话，一个每天开着 DSH 的人，日志会无限长：Get-Content -Tail 越来越慢，
+# 而真正有用的永远是最后几百行。超过 1 MB 就滚一份 .1，只留一代。
+$script:logMaxBytes = 1MB
+$script:logWrites = 0
+function Rotate-LogIfBig {
+  try {
+    if (-not (Test-Path -LiteralPath $logFile)) { return }
+    if ((Get-Item -LiteralPath $logFile).Length -lt $script:logMaxBytes) { return }
+    Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
+  } catch { }   # 轮转失败不该影响写日志本身
+}
+
+# ── 节流日志 ────────────────────────────────────────────────────────────
+# 定时器和穿透判定每 100~120ms 跑一次，那里出事会疯狂重复报同一条。
+# 不节流的话日志会被自己的错误刷爆，反而把别的线索挤没了。
+$script:throttledAt = @{}
+function LogThrottled([string]$Key, [string]$Message, [int]$WindowSeconds = 60) {
+  $now = Get-Date
+  $last = $script:throttledAt[$Key]
+  if ($null -ne $last -and ($now - $last).TotalSeconds -lt $WindowSeconds) { return }
+  $script:throttledAt[$Key] = $now
+  Log "$Message（同类问题 $WindowSeconds 秒内只记一次）"
+}
+
+# 起手先滚一次：上次会话可能留下了超大日志
+Rotate-LogIfBig
 Log "启动 pid=$PID url=$Url pwsh=$($PSVersionTable.PSVersion)"
 try {
   $awareness = 0
@@ -250,7 +280,7 @@ function Get-Scale {
       $d = [Dsh.Dpi]::GetDpiForWindow($form.Handle)
       if ($d -gt 0) { return $d / 96.0 }
     }
-  } catch { }
+      } catch { LogThrottled 'dpi' '读窗口 DPI 失败，回落到上次的值' }
   return $script:appliedScale
 }
 
@@ -271,7 +301,7 @@ function Sync-Size {
   try {
     $form.Size = New-Object System.Drawing.Size($w, $h)
     Log "DPI 变成 $([math]::Round($s*100))%，窗口重设为 ${w}x${h}"
-  } catch { }
+  } catch { LogThrottled 'syncsize' "跨屏重设窗口尺寸失败：$($_.Exception.Message)" }
 }
 
 $form = New-Object System.Windows.Forms.Form
@@ -369,7 +399,7 @@ Sync-Size
 # 只在缩放真的变了才重设窗口，平时只是一次 P/Invoke。
 $script:dpiWatch = New-Object System.Windows.Forms.Timer
 $script:dpiWatch.Interval = 1000
-$script:dpiWatch.Add_Tick({ try { Sync-Size } catch { } })
+$script:dpiWatch.Add_Tick({ try { Sync-Size } catch { LogThrottled 'dpiwatch' "DPI 定时器异常：$($_.Exception.Message)" } })
 $script:dpiWatch.Start()
 
 
@@ -489,7 +519,7 @@ function Set-PassThrough {
     if ($On) { $ex = $ex -bor [Dsh.Top]::WS_EX_TRANSPARENT }
     else { $ex = $ex -band (-bnot [Dsh.Top]::WS_EX_TRANSPARENT) }
     [void][Dsh.Top]::SetWindowLong($form.Handle, [Dsh.Top]::GWL_EXSTYLE, $ex)
-  } catch { }
+  } catch { LogThrottled 'setpass' "设置点击穿透失败：$($_.Exception.Message)" }
 }
 
 function Update-PassThrough {
@@ -519,7 +549,7 @@ function Update-PassThrough {
     }
 
     Set-PassThrough (-not $inside)
-  } catch { }
+  } catch { LogThrottled 'updatepass' "穿透判定失败：$($_.Exception.Message)" }
 }
 
 # 穿透判定：120ms 一次。
@@ -529,7 +559,7 @@ function Update-PassThrough {
 # 没人接这个异常 → 直接弹「未经处理的异常」对话框。桌宠一启动就报错，就是这么来的。
 $script:passWatch = New-Object System.Windows.Forms.Timer
 $script:passWatch.Interval = 120
-$script:passWatch.Add_Tick({ try { Update-PassThrough } catch { } })
+$script:passWatch.Add_Tick({ try { Update-PassThrough } catch { LogThrottled 'passwatch' "穿透定时器异常：$($_.Exception.Message)" } })
 $script:passWatch.Start()
 
 $controller.CoreWebView2.Add_WebMessageReceived({
@@ -668,8 +698,8 @@ $heartbeat.Add_Tick({ try {
     # msedgewebview2.exe，直接比 PID 会永远判成「被盖住」。
     $root = [Dsh.Top]::GetAncestor($hit, [Dsh.Top]::GA_ROOT)
     if ($root -ne $form.Handle) { Assert-TopMost '被其它窗口盖住' }
-  } catch { }
-  } catch { } })
+    } catch { LogThrottled 'topmost' "置顶检查失败：$($_.Exception.Message)" }
+    } catch { LogThrottled 'heartbeat' "心跳异常：$($_.Exception.Message)" } })
 $heartbeat.Start()
 
 Log '桌宠已就位（Ctrl+Q 或 Esc 退出；拖动移动；滚轮缩放）'
@@ -715,7 +745,7 @@ if ($SelfTestMs -gt 0) {
     }
     $lines | Set-Content -LiteralPath $selfTestFile -Encoding UTF8
     $form.Close()
-  } catch { } })
+    } catch { LogThrottled 'probe' "自检探针异常：$($_.Exception.Message)" } })
   $probe.Start()
 }
 

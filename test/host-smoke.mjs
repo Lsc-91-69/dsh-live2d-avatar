@@ -759,6 +759,48 @@ console.log('\n— 黄灯的第二条路：tools/pre-execute（不依赖审批�
   await json('/live2d/probe-status?set=clear')
 }
 
+console.log('\n— 失败要留痕：静默 catch 与未接的 Promise —')
+{
+  const host = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+
+  // 「发了不等」的异步调用如果 reject 就是 unhandledRejection。
+  // 在现代 Node 里那是**直接终止进程** —— 也就是把整个 DSH 带走。
+  const fireAndForget = [...host.matchAll(/void\s+([A-Za-z_][\w.]*)\(/g)]
+  const unguarded = fireAndForget.filter(([, name]) => {
+    const at = host.indexOf(`void ${name}(`)
+    const near = host.slice(at, at + 220)
+    return !/\.catch\s*\(/.test(near)
+  })
+  assert('没有裸的 void xxx()（必须带 .catch）', unguarded.length === 0,
+    unguarded.map(u => u[1]).join(','))
+
+  // 插件不该给宿主装全局 unhandledRejection —— 那会改变整个进程的行为，
+  // 把别的插件/宿主自己的错误也一起吞掉。要从源头把 Promise 接住。
+  assert('没有给宿主加进程级监听', !/process\.on\('unhandledRejection'/.test(host))
+
+  // 外壳里的静默 catch：只允许「记日志会递归 / 确实没意义」的那几处
+  const silent = (pet.match(/catch\s*\{\s*\}/g) || []).length
+  assert('静默 catch 已收敛到个位数', silent <= 8, silent + ' 处')
+  assert('功能路径改用节流日志', pet.includes('function LogThrottled'))
+  assert('穿透失败会留痕', pet.includes("LogThrottled 'updatepass'") && pet.includes("LogThrottled 'setpass'"))
+  assert('定时器异常会留痕', pet.includes("LogThrottled 'passwatch'") && pet.includes("LogThrottled 'dpiwatch'"))
+  assert('心跳异常会留痕', pet.includes("LogThrottled 'heartbeat'"))
+  assert('置顶检查失败会留痕', pet.includes("LogThrottled 'topmost'"))
+  assert('节流窗口存在（否则日志会被刷爆）', /WindowSeconds\s*=\s*\d+/.test(pet))
+}
+
+console.log('\n— 日志不能无限长 —')
+{
+  const pet = readFileSync(join(HERE, '..', 'pet', 'dsh-pet.ps1'), 'utf8')
+  assert('有轮转函数', pet.includes('function Rotate-LogIfBig'))
+  assert('有大小阈值', /logMaxBytes\s*=\s*1MB/.test(pet))
+  assert('超过就滚一份 .1', pet.includes('"$logFile.1"'))
+  assert('写日志时会周期性检查', pet.includes('% 500') && pet.includes('Rotate-LogIfBig'))
+  assert('启动时先滚一次', pet.includes('起手先滚一次'))
+  assert('轮转失败不影响写日志', pet.includes('轮转失败不该影响写日志本身'))
+}
+
 console.log('\n— 待机功耗（实测渲染进程待机就吃掉单核 44%）—')
 {
   const html = readFileSync(join(HERE, '..', 'host.js'), 'utf8')
